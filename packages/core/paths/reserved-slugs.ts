@@ -103,10 +103,18 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "tokens",
   "cli",
 
-  // DingTalk account-bind route
-  // `/dingtalk/bind` is a global pre-workspace route where a member links their
-  // DingTalk identity. Reserve the prefix so a workspace slug cannot shadow it.
+  // IM account-bind routes
+  // Each chat channel the server can reach exposes `/<channel>/bind` as a global
+  // pre-workspace route where a member links their identity (see
+  // `apps/web/app/*`). Reserve every prefix: an unreserved one lets a workspace
+  // take the slug and shadow the binding URL, so the member either loses the
+  // bind page or lands on someone else's workspace content at a URL they believe
+  // is the platform's own.
   "dingtalk",
+  "lark",
+  "slack",
+  "telegram",
+  "wecom",
 
   // Backend ops / observability
   // `/health`, `/readyz`, `/healthz`, and `/ws` exist on the backend host;

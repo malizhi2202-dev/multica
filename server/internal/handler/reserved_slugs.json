@@ -97,10 +97,14 @@
       ]
     },
     {
-      "label": "DingTalk account-bind route",
-      "description": "`/dingtalk/bind` is a global pre-workspace route where a member links their DingTalk identity. Reserve the prefix so a workspace slug cannot shadow it.",
+      "label": "IM account-bind routes",
+      "description": "Each chat channel the server can reach exposes `/<channel>/bind` as a global pre-workspace route where a member links their identity (see `apps/web/app/*`). Reserve every prefix: an unreserved one lets a workspace take the slug and shadow the binding URL, so the member either loses the bind page or lands on someone else's workspace content at a URL they believe is the platform's own.",
       "slugs": [
-        "dingtalk"
+        "dingtalk",
+        "lark",
+        "slack",
+        "telegram",
+        "wecom"
       ]
     },
     {
