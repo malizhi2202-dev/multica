@@ -694,48 +694,57 @@ func TestTuituiRouterInboundImageBindsAttachmentAndIntent(t *testing.T) {
 }
 
 // TestTuituiRouterDropsUnaddressedGroupMessage keeps the pre-identity group
-// gate honest: an ordinary group post (no reply to the bot) is dropped and
+// gate honest: an ordinary group post (the bot was not @-mentioned in it,
+// whether the platform sent at_me:false or no at_me at all) is dropped and
 // audited, and an unbound sender never even reaches the identity check.
 func TestTuituiRouterDropsUnaddressedGroupMessage(t *testing.T) {
-	f := newTuituiRouteFixture(t)
-	r := f.router(f.replier(), &fakeTaskEnqueuer{})
+	for _, tc := range []struct{ name, data string }{
+		{"at_me_false", `{"msgid":"m-grp-1","msg_type":"text","text":"casual chatter","group_id":"778899","at_me":false}`},
+		{"at_me_absent", `{"msgid":"m-grp-1","msg_type":"text","text":"casual chatter","group_id":"778899"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTuituiRouteFixture(t)
+			r := f.router(f.replier(), &fakeTaskEnqueuer{})
 
-	msg := f.inbound(t, eventGroupChat, f.sender,
-		`{"msgid":"m-grp-1","msg_type":"text","text":"casual chatter","group_id":"778899"}`)
-	if msg.AddressedToBot {
-		t.Fatal("a group message without ref.is_me must not be bot-addressed")
-	}
-	if err := r.Handle(context.Background(), msg); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	drainRouter(t, r)
+			msg := f.inbound(t, eventGroupChat, f.sender, tc.data)
+			if msg.AddressedToBot {
+				t.Fatal("a group message that does not @ the bot must not be addressed")
+			}
+			if err := r.Handle(context.Background(), msg); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			drainRouter(t, r)
 
-	var reason string
-	f.fx.QueryRow(t, `
+			var reason string
+			f.fx.QueryRow(t, `
 		SELECT drop_reason FROM channel_inbound_audit
 		WHERE installation_id = $1 AND channel_message_id = $2`,
-		f.installationStr, "m-grp-1").Scan(&reason)
-	if reason != string(engine.DropReasonNotAddressedInGroup) {
-		t.Errorf("drop reason = %q, want %q", reason, engine.DropReasonNotAddressedInGroup)
-	}
-	if got := f.fx.Count(t, `SELECT count(*) FROM channel_binding_token WHERE installation_id = $1`, f.installationStr); got != 0 {
-		t.Errorf("binding tokens = %d, want 0 — idle group chatter must not spam prompts", got)
+				f.installationStr, "m-grp-1").Scan(&reason)
+			if reason != string(engine.DropReasonNotAddressedInGroup) {
+				t.Errorf("drop reason = %q, want %q", reason, engine.DropReasonNotAddressedInGroup)
+			}
+			if got := f.fx.Count(t, `SELECT count(*) FROM channel_binding_token WHERE installation_id = $1`, f.installationStr); got != 0 {
+				t.Errorf("binding tokens = %d, want 0 — idle group chatter must not spam prompts", got)
+			}
+		})
 	}
 }
 
 // TestTuituiRouterAddressedGroupBindsGroupSession closes the group loop: a
-// reply to the bot (ref.is_me) is addressed, and the binding is keyed by
-// the group id with chat_type group.
+// message that @-mentions the bot (data.at_me) is addressed, and the binding
+// is keyed by the group id with chat_type group. The ref block rides along
+// because a real @ of the bot in this platform arrives as a quote of its last
+// answer, and the quote must not be what decides this case.
 func TestTuituiRouterAddressedGroupBindsGroupSession(t *testing.T) {
 	f := newTuituiRouteFixture(t)
 	f.bindSender()
 	r := f.router(f.replier(), &fakeTaskEnqueuer{})
 
 	msg := f.inbound(t, eventGroupChat, f.sender,
-		`{"msgid":"m-grp-2","msg_type":"text","text":"answer this","group_id":"778899",
+		`{"msgid":"m-grp-2","msg_type":"text","text":"answer this","group_id":"778899","at_me":true,
 		  "ref":{"msgid":"bot-prev","content":"earlier answer","user_name":"bot","is_me":true}}`)
 	if !msg.AddressedToBot {
-		t.Fatal("a reply quoting the bot (ref.is_me) must count as addressed")
+		t.Fatal("a group message with at_me true must count as addressed")
 	}
 	if err := r.Handle(context.Background(), msg); err != nil {
 		t.Fatalf("Handle: %v", err)

@@ -42,12 +42,23 @@ func TestNormalizeSingleChat(t *testing.T) {
 	if !msg.AddressedToBot {
 		t.Error("p2p must be addressed to bot")
 	}
+	// A direct chat needs no @: the platform sends no at_me on these frames,
+	// and a false one must not become a group-style gate either.
+	fNoMention := frameJSON(t, "single_chat", `{"msgid":"m-2","msg_type":"text","text":"hello","at_me":false}`)
+	if n2, ok := normalizeEvent(fNoMention, "app-1"); !ok || !n2.msg.AddressedToBot {
+		t.Errorf("p2p must stay addressed with at_me absent or false: ok=%v %+v", ok, n2.msg)
+	}
 	if msg.Source.ChannelType != TypeTuitui {
 		t.Errorf("channel type = %q", msg.Source.ChannelType)
 	}
 }
 
 func TestNormalizeGroupChatAddressed(t *testing.T) {
+	// The group gate is the platform's own data.at_me flag. ref.is_me is a
+	// different fact (this message QUOTES the bot), so the matrix below keeps
+	// both signals apart in every combination: quoting without an @ must be
+	// rejected (that is the shipped bug this pins shut), and an @ with or
+	// without a quote must be accepted.
 	cases := []struct {
 		name  string
 		data  string
@@ -56,19 +67,61 @@ func TestNormalizeGroupChatAddressed(t *testing.T) {
 		ctx   bool
 	}{
 		{
-			name: "unknown_fields_ignored",
+			name: "mention",
 			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":true}`,
-			want: false,
+			want: true,
 		},
 		{
-			name: "reply_to_bot",
-			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","ref":{"msgid":"b-1","is_me":true,"content":"prior"}}`,
+			name: "mention_with_unrelated_field",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":true,"some_new_field":{"a":1}}`,
+			want: true,
+		},
+		{
+			name: "mention_and_quote",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":true,"ref":{"msgid":"b-1","is_me":true,"content":"prior"}}`,
 			want: true, reply: "b-1", ctx: true,
 		},
 		{
-			name: "reply_to_other_no_reply_ctx",
-			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","ref":{"msgid":"x-9","is_me":false,"content":"theirs"}}`,
-			want: false, ctx: true,
+			name: "mention_and_quote_someone_elses",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":true,"ref":{"msgid":"x-9","is_me":false,"content":"theirs"}}`,
+			want: true, ctx: true,
+		},
+		{
+			// The pre-fix rule read exactly this combination as "addressed",
+			// and read a plain @ (no quote at all) as silence.
+			name: "quote_without_mention_is_not_addressed",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","ref":{"msgid":"b-1","is_me":true,"content":"prior"}}`,
+			want: false, reply: "b-1", ctx: true,
+		},
+		{
+			name: "at_me_false",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":false}`,
+			want: false,
+		},
+		{
+			name: "at_me_null",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":null}`,
+			want: false,
+		},
+		{
+			name: "at_me_string_true",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":"true"}`,
+			want: true,
+		},
+		{
+			name: "at_me_string_false",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":"false"}`,
+			want: false,
+		},
+		{
+			name: "at_me_number",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":1}`,
+			want: true,
+		},
+		{
+			name: "at_me_empty_list",
+			data: `{"msgid":"g-1","group_id":"1234567890123456","msg_type":"text","text":"hi","at_me":[]}`,
+			want: false,
 		},
 		{
 			name: "silent",
@@ -347,8 +400,10 @@ func TestSplitComposeTeamsChatID(t *testing.T) {
 }
 
 func TestNormalizeTeamsAddressedToBot(t *testing.T) {
-	// Teams posts carry no mention / is_me signal; the bot is the reason
-	// the channel subscription exists, so posts arrive as addressed.
+	// Teams posts carry no mention / is_me signal; the bot is the reason the
+	// channel subscription exists, so posts arrive as addressed. See
+	// TestNormalizeTeamsIgnoresAtMe for why the group at_me gate stops at
+	// group_chat and is not generalized here.
 	f := frameJSON(t, "teams_post_create", `{"team_id":"t","channel_id":"c","post_id":"p","content":"hi"}`)
 	n, ok := normalizeEvent(f, "app-1")
 	if !ok || !n.msg.AddressedToBot {
@@ -359,6 +414,70 @@ func TestNormalizeTeamsAddressedToBot(t *testing.T) {
 	f = frameJSON(t, "teams_post_modify", `{"team_id":"t","channel_id":"c","post_id":"p","content":"edited"}`)
 	if n2, ok := normalizeEvent(f, "app-1"); !ok || n2.msg.MessageID != "p" {
 		t.Fatalf("teams_post_modify must normalize, ok=%v %+v", ok, n2.msg)
+	}
+}
+
+// TestNormalizeTeamsIgnoresAtMe pins the deliberate asymmetry the group @-
+// mention fix stops short of: a teams post stays bot-addressed whether or not
+// its payload carries at_me, because nothing observed shows a post carrying
+// that field and requiring one would silence every subscribed channel.
+// Applying the group rule to this branch turns both subtests red.
+func TestNormalizeTeamsIgnoresAtMe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{"at_me false", `{"team_id":"t","channel_id":"c","post_id":"p","content":"hi","at_me":false}`},
+		{"at_me missing", `{"team_id":"t","channel_id":"c","post_id":"p","content":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, ok := normalizeEvent(frameJSON(t, "teams_post_create", tc.data), "app-1")
+			if !ok {
+				t.Fatal("teams_post_create must normalize")
+			}
+			if !n.msg.AddressedToBot {
+				t.Errorf("teams post must stay addressed (data=%s)", tc.data)
+			}
+			if n.kind != kindTeams {
+				t.Errorf("kind = %d, want kindTeams", n.kind)
+			}
+		})
+	}
+}
+
+// TestTruthyMatchesReferenceMentionTest keeps the at_me reading honest for the
+// spellings this platform's other fields are known to vary in (see flexString):
+// only null / false / 0 / "" / an empty list or object read as "not
+// mentioned", and none of them fail the payload decode.
+func TestTruthyMatchesReferenceMentionTest(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{`true`, true},
+		{`false`, false},
+		{`null`, false},
+		{`1`, true},
+		{`0`, false},
+		{`2.5`, true},
+		{`"true"`, true},
+		{`"TRUE"`, true},
+		{`"false"`, false},
+		{`""`, false},
+		{`"alice"`, true},
+		{`[]`, false},
+		{`["bot"]`, true},
+		{`{}`, false},
+		{`{"user":"bot"}`, true},
+	}
+	for _, tc := range cases {
+		var got flexBool
+		if err := json.Unmarshal([]byte(tc.raw), &got); err != nil {
+			t.Fatalf("at_me %s must decode, got error: %v", tc.raw, err)
+		}
+		if bool(got) != tc.want {
+			t.Errorf("truthy(%s) = %v, want %v", tc.raw, bool(got), tc.want)
+		}
 	}
 }
 

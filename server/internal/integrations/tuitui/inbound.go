@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
@@ -134,6 +135,12 @@ type eventPayload struct {
 	// group_chat.
 	GroupID   flexString `json:"group_id"`
 	GroupName string     `json:"group_name"`
+	// AtMe is the platform's own "this message @-mentions this bot" flag.
+	// The reference client gates its group handling on
+	// raw["data"]["at_me"] — the very data object this struct decodes — so
+	// the signal lives at this level, never on refInfo (whose is_me only
+	// says the quoted message was the bot's).
+	AtMe flexBool `json:"at_me"`
 
 	// teams_post_create / teams_post_modify.
 	TeamID      flexString `json:"team_id"`
@@ -212,6 +219,52 @@ func (s *flexString) UnmarshalJSON(b []byte) error {
 	}
 	*s = flexString(num.String())
 	return nil
+}
+
+// flexBool accepts a platform boolean in any JSON spelling, so a mention flag
+// delivered as 1 / "true" / true reads the same. A strict `bool` field would
+// fail the WHOLE payload decode on an unexpected spelling, which normalizeEvent
+// treats as an undeliverable event — the bot would go silent in that chat with
+// only a debug line to show for it.
+type flexBool bool
+
+func (b *flexBool) UnmarshalJSON(raw []byte) error {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	*b = flexBool(truthy(v))
+	return nil
+}
+
+// truthy reads a platform JSON value the way the reference client reads its
+// mention flag (`if not at_me: return` in Python): false for null, false, 0,
+// "", an empty list or object, and for the strings "false"/"False"; anything
+// else present is a value the platform chose to send and counts as true. An
+// ABSENT key never reaches here — the struct field keeps its zero value, which
+// is false, "not addressed" — the safe default in this direction, because
+// guessing "addressed" would have the bot answer unrelated group chatter.
+func truthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case string:
+		s := strings.TrimSpace(t)
+		if parsed, err := strconv.ParseBool(s); err == nil {
+			return parsed
+		}
+		return s != ""
+	case []any:
+		return len(t) > 0
+	case map[string]any:
+		return len(t) > 0
+	default:
+		return true
+	}
 }
 
 // normalizedInbound is the adapter-internal result of translating one chat
@@ -312,6 +365,13 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 		}
 		msg.Source.ChatID = chatID
 		msg.Source.ChatType = channel.ChatTypeGroup
+		// The only "this is for the bot" signal a group message has is the
+		// platform's own data.at_me flag — the same one the reference client
+		// tests before answering in a group. ref.is_me is NOT that signal: it
+		// says the message QUOTES one of the bot's messages, which is reply
+		// context (handled below), and gating on it dropped every genuine @
+		// because a plain mention carries no quote at all.
+		msg.AddressedToBot = bool(payload.AtMe)
 		flattenChatMessage(&payload, &msg)
 
 	default: // teams_post_create / teams_post_modify
@@ -334,6 +394,13 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 		// reference bridge feeds every post to its agent. Treat posts as
 		// bot-addressed; the durable (installation, MessageID) dedup still
 		// collapses the create/modify pair for one post.
+		//
+		// This branch deliberately does NOT read data.at_me, unlike the plain
+		// group branch above: nothing observed shows a post carrying that
+		// field, and demanding one would turn every subscribed channel into
+		// silent not_addressed_in_group drops — trading a confirmed bug for an
+		// unconfirmed one. TestNormalizeTeamsIgnoresAtMe pins this so the
+		// group rule is never "generalized" here without its own evidence.
 		msg.AddressedToBot = true
 		msg.Text = payload.Content
 		msg.CommandText = payload.Content
@@ -365,11 +432,12 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 		}
 	}
 
-	// Reply / addressing semantics follow the reference client: a reply
-	// counts as "addressed to this bot" only when ref.is_me proves the
+	// Reply context follows the reference client: only ref.is_me proves the
 	// quoted message was the bot's, and only then is ReplyTo carried —
 	// outbound cannot quote on this platform, so a non-bot quote is just
-	// context, appended to the text like the reference client does.
+	// context, appended to the text like the reference client does. This is
+	// independent of the group @-mention gate above: quoting the bot is not
+	// being mentioned, and being mentioned does not require a quote.
 	if payload.Ref != nil && payload.Ref.MsgID != "" {
 		if payload.Ref.IsMe {
 			msg.ReplyTo = &channel.ReplyCtx{MessageID: payload.Ref.MsgID.String()}
@@ -378,9 +446,6 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 			msg.Text += fmt.Sprintf("\n\n[引用来自 %s 的消息]\n%s", payload.Ref.UserName, payload.Ref.Content)
 			msg.HasSelectedContext = true
 		}
-	}
-	if ev == kindGroup {
-		msg.AddressedToBot = payload.Ref != nil && payload.Ref.IsMe
 	}
 	return normalizedInbound{msg: msg, kind: ev}, true
 }
