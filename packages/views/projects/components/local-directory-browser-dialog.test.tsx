@@ -14,16 +14,16 @@ const strings = en.resources;
 
 // The documented 200 shape of GET /api/workspaces/{id}/local-dirs.
 const RESOLVED = {
-  path: "/home/malizhi/project",
-  parent: "/home/malizhi",
+  path: "/home/example/project",
+  parent: "/home/example",
   hostname: "77220d771381",
-  home: "/home/malizhi",
+  home: "/home/example",
   daemon_id: "01a0c304-922a-7656-b761-20cbefa307b3",
   daemon_status: "resolved",
   dirs: [
     {
       name: "multica",
-      path: "/home/malizhi/project/multica",
+      path: "/home/example/project/multica",
       has_children: true,
       blocked: false,
     },
@@ -116,7 +116,7 @@ describe("LocalDirectoryBrowserDialog — listing", () => {
     expect(screen.getByTestId("local-browser-hostname").textContent).toBe(
       "77220d771381",
     );
-    expect(screen.getByText("/home/malizhi/project")).toBeInTheDocument();
+    expect(screen.getByText("/home/example/project")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "multica" })).toBeInTheDocument();
   });
 
@@ -134,13 +134,13 @@ describe("LocalDirectoryBrowserDialog — listing", () => {
   it("navigates into a child, up to the parent, and home", () => {
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: "multica" }));
-    expect(browseParams.at(-1)).toEqual({ path: "/home/malizhi/project/multica" });
+    expect(browseParams.at(-1)).toEqual({ path: "/home/example/project/multica" });
 
     fireEvent.click(screen.getByRole("button", { name: strings.local_browser_up }));
-    expect(browseParams.at(-1)).toEqual({ path: "/home/malizhi" });
+    expect(browseParams.at(-1)).toEqual({ path: "/home/example" });
 
     fireEvent.click(screen.getByRole("button", { name: strings.local_browser_home }));
-    expect(browseParams.at(-1)).toEqual({ path: "/home/malizhi" });
+    expect(browseParams.at(-1)).toEqual({ path: "/home/example" });
   });
 
   it("disables Up when the server says there is no parent to offer", () => {
@@ -244,7 +244,7 @@ describe("LocalDirectoryBrowserDialog — confirm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
 
     expect(onConfirm).toHaveBeenCalledWith({
-      localPath: "/home/malizhi/project",
+      localPath: "/home/example/project",
       daemonId: "01a0c304-922a-7656-b761-20cbefa307b3",
       label: "project",
       mode: "worktree",

@@ -7,8 +7,8 @@
 // over the HTTP robot API (https://{host}:{port}/robot/message/custom/send,
 // query-string authenticated with appid/secret — NOT headers).
 //
-// Platform facts this adapter encodes (source: the Python reference client
-// tui_coding_agent_bridge/bridge/tuitui_client.py):
+// Platform facts this adapter encodes, verified against a Python reference
+// client for the same Tuitui robot API:
 //
 //   - Every JSON response carries an errcode; non-zero is a failure.
 //   - Inbound event types are single_chat, group_chat, teams_post_create and

@@ -1289,14 +1289,14 @@ describe("AppConfigSchema local_dir_browser_supported drift", () => {
 
 describe("LocalDirBrowseResponseSchema", () => {
   const VALID = {
-    path: "/home/malizhi/project",
-    parent: "/home/malizhi",
+    path: "/home/example/project",
+    parent: "/home/example",
     hostname: "77220d771381",
-    home: "/home/malizhi",
+    home: "/home/example",
     daemon_id: "01a0c304-922a-7656-b761-20cbefa307b3",
     daemon_status: "resolved",
     dirs: [
-      { name: "multica", path: "/home/malizhi/project/multica", has_children: true, blocked: false },
+      { name: "multica", path: "/home/example/project/multica", has_children: true, blocked: false },
     ],
   };
 
