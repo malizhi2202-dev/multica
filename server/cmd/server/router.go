@@ -913,15 +913,29 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// it is set, else the stored integration DEK. There is no inbound
 	// callback to expose, so nothing here needs to be reachable from the
 	// internet.
-	//
-	// Only the Factory is registered. Tuitui ships no ResolverSet, so the
-	// channelRouter stays unregistered on purpose: a frame arriving without the
-	// session / reply / media resolvers the other channels install would be
-	// dropped rather than half-handled. Installing a bot therefore persists the
-	// credentials and the Supervisor drives its connection, but nothing is
-	// dispatched into chat until that set lands.
 	if tuituiSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_TUITUI_SECRET_KEY", dekQueries); err == nil {
 		box := tuituiSecret.Box
+		// Outbound replier: delivers the NeedsBinding prompt (minting the
+		// single-use token embedded in its redeem link, redeemed by the
+		// public /api/tuitui/binding/redeem endpoint below) plus the status /
+		// command notices. The chat-done subscriber in NewOutbound carries
+		// the agent's own replies. Media and typing stay unwired: inbound
+		// keeps media urls in Text/Raw and emits no MediaRefs, and the
+		// platform has no per-session indicator lifecycle to clear.
+		tuituiBindingSvc := tuitui.NewBindingTokenService(queries, pool)
+		h.TuituiBindingTokens = tuituiBindingSvc
+		tuituiReplier := tuitui.NewOutboundReplier(tuitui.OutboundReplierConfig{
+			Binding: tuituiBindingSvc,
+			Decrypt: box.Open,
+			// The bind link (/tuitui/bind) is a web-app page, so it must use
+			// the app URL (MULTICA_APP_URL ?? FRONTEND_ORIGIN), NOT
+			// MULTICA_PUBLIC_URL (the backend/API URL). Mirrors the DingTalk
+			// and Slack repliers (appURLFromEnv).
+			AppURL: appURLFromEnv(),
+			Logger: slog.Default(),
+		})
+		channelRouter.Register(tuitui.TypeTuitui, tuitui.NewTuituiResolverSet(queries, pool, tuituiReplier))
+		tuitui.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
 		tuitui.RegisterTuitui(channelRegistry, tuitui.ChannelDeps{
 			Decrypt: box.Open,
 			Logger:  slog.Default(),
@@ -932,7 +946,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		} else {
 			h.TuituiInstall = installSvc
 		}
-		h.TuituiBindingTokens = tuitui.NewBindingTokenService(queries, pool)
 		slog.Info("tuitui integration enabled (BYO per-installation websocket mode)")
 	} else {
 		slog.Info("tuitui integration disabled (no master key available)", "integration", "tuitui", "legacy_env", "MULTICA_TUITUI_SECRET_KEY", "error", err)

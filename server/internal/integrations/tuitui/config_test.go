@@ -133,15 +133,29 @@ func TestSeenEventDedup(t *testing.T) {
 
 func TestNormalizeKeepsRawRoundTrip(t *testing.T) {
 	f := frameJSON(t, "single_chat", `{"msgid":"m","msg_type":"text","text":"x","at_me":true}`)
-	n, ok := normalizeEvent(f)
+	n, ok := normalizeEvent(f, "app-stamp-1")
 	if !ok {
 		t.Fatal("want ok")
 	}
 	if len(n.msg.Raw) == 0 {
 		t.Fatal("Raw payload must carry the untouched event body")
 	}
-	var back eventBody
-	if err := json.Unmarshal(n.msg.Raw, &back); err != nil || back.Event != "single_chat" {
-		t.Errorf("Raw round trip failed: %v %+v", err, back)
+	raw, err := decodeTuituiRaw(n.msg)
+	if err != nil {
+		t.Fatalf("decode stamped Raw: %v", err)
+	}
+	if raw.AppID != "app-stamp-1" {
+		t.Errorf("stamped app_id = %q, want app-stamp-1 — the installation resolver routes on it", raw.AppID)
+	}
+	if raw.Body.Event != "single_chat" || raw.Body.UserAccount != "alice" {
+		t.Errorf("Raw body round trip lost fields: %+v", raw.Body)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(n.msg.Raw, &back); err != nil {
+		t.Fatalf("Raw must be JSON: %v", err)
+	}
+	body, _ := back["body"].(map[string]any)
+	if _, ok := body["data"].(map[string]any)["at_me"]; !ok {
+		t.Errorf("Raw body.data must keep the untouched platform payload: %s", n.msg.Raw)
 	}
 }

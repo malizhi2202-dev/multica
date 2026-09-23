@@ -126,7 +126,7 @@ func (c *tuituiChannel) handleFrame(ctx context.Context, frame *wsFrame) {
 		return
 	}
 
-	norm, ok := normalizeEvent(frame)
+	norm, ok := normalizeEvent(frame, c.cfg.AppID)
 	if !ok {
 		c.logger.InfoContext(ctx, "tuitui: dropped inbound event",
 			"event", frame.Body.Event, "event_id", eventID)

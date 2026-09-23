@@ -22,7 +22,7 @@ func frameJSON(t *testing.T, event string, data string) *wsFrame {
 
 func TestNormalizeSingleChat(t *testing.T) {
 	f := frameJSON(t, "single_chat", `{"msgid":"m-1","msg_type":"text","text":"hello"}`)
-	n, ok := normalizeEvent(f)
+	n, ok := normalizeEvent(f, "app-1")
 	if !ok {
 		t.Fatal("single_chat should normalize")
 	}
@@ -79,7 +79,7 @@ func TestNormalizeGroupChatAddressed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := frameJSON(t, "group_chat", tc.data)
-			n, ok := normalizeEvent(f)
+			n, ok := normalizeEvent(f, "app-1")
 			if !ok {
 				t.Fatal("group_chat should normalize")
 			}
@@ -110,7 +110,7 @@ func TestNormalizeGroupChatAddressed(t *testing.T) {
 func TestNormalizeTeamsCompositeChatID(t *testing.T) {
 	t.Run("thread reply", func(t *testing.T) {
 		f := frameJSON(t, "teams_post_create", `{"team_id":"t1","channel_id":"c2","post_id":"p9","parent_id":"th3","content":"yes"}`)
-		n, ok := normalizeEvent(f)
+		n, ok := normalizeEvent(f, "app-1")
 		if !ok {
 			t.Fatal("teams_post_create should normalize")
 		}
@@ -132,7 +132,7 @@ func TestNormalizeTeamsCompositeChatID(t *testing.T) {
 	})
 	t.Run("root post falls back to post_id as thread", func(t *testing.T) {
 		f := frameJSON(t, "teams_post_modify", `{"team_id":7,"channel_id":8,"post_id":99,"parent_id":"0","content":"edit"}`)
-		n, ok := normalizeEvent(f)
+		n, ok := normalizeEvent(f, "app-1")
 		if !ok {
 			t.Fatal("numeric ids must normalize")
 		}
@@ -147,22 +147,22 @@ func TestNormalizeDropsWithoutPlatformID(t *testing.T) {
 	// platform id, so these must be dropped (never uuid-minted like the
 	// reference client did).
 	f := frameJSON(t, "single_chat", `{"msg_type":"text","text":"anon"}`)
-	if _, ok := normalizeEvent(f); ok {
+	if _, ok := normalizeEvent(f, "app-1"); ok {
 		t.Fatal("message without msgid must be dropped")
 	}
 	f = frameJSON(t, "teams_post_create", `{"team_id":"t","channel_id":"c","content":"no id"}`)
-	if _, ok := normalizeEvent(f); ok {
+	if _, ok := normalizeEvent(f, "app-1"); ok {
 		t.Fatal("teams post without post_id must be dropped")
 	}
 	f = frameJSON(t, "someone_elses_event", `{"msgid":"m"}`)
-	if _, ok := normalizeEvent(f); ok {
+	if _, ok := normalizeEvent(f, "app-1"); ok {
 		t.Fatal("unknown event type must be dropped")
 	}
 }
 
 func TestNormalizeMediaPlaceholders(t *testing.T) {
 	f := frameJSON(t, "single_chat", `{"msgid":"m","msg_type":"image","images":["u1","u2"]}`)
-	n, ok := normalizeEvent(f)
+	n, ok := normalizeEvent(f, "app-1")
 	if !ok {
 		t.Fatal("image should normalize")
 	}
@@ -177,7 +177,7 @@ func TestNormalizeMediaPlaceholders(t *testing.T) {
 	}
 
 	f = frameJSON(t, "single_chat", `{"msgid":"m2","msg_type":"file","file":{"url":"u3","name":"a.bin"}}`)
-	n, _ = normalizeEvent(f)
+	n, _ = normalizeEvent(f, "app-1")
 	if n.msg.Type != channel.MsgTypeFile || !strings.Contains(n.msg.Text, "a.bin") {
 		t.Errorf("file mapping = %v %q", n.msg.Type, n.msg.Text)
 	}
@@ -211,14 +211,14 @@ func TestNormalizeTeamsAddressedToBot(t *testing.T) {
 	// Teams posts carry no mention / is_me signal; the bot is the reason
 	// the channel subscription exists, so posts arrive as addressed.
 	f := frameJSON(t, "teams_post_create", `{"team_id":"t","channel_id":"c","post_id":"p","content":"hi"}`)
-	n, ok := normalizeEvent(f)
+	n, ok := normalizeEvent(f, "app-1")
 	if !ok || !n.msg.AddressedToBot {
 		t.Fatalf("teams post must normalize as addressed: %+v ok=%v", n.msg, ok)
 	}
 	// Modify is one of the four deliverable events (dedup of the
 	// create/modify pair is the core's job, not the adapter's).
 	f = frameJSON(t, "teams_post_modify", `{"team_id":"t","channel_id":"c","post_id":"p","content":"edited"}`)
-	if n2, ok := normalizeEvent(f); !ok || n2.msg.MessageID != "p" {
+	if n2, ok := normalizeEvent(f, "app-1"); !ok || n2.msg.MessageID != "p" {
 		t.Fatalf("teams_post_modify must normalize, ok=%v %+v", ok, n2.msg)
 	}
 }

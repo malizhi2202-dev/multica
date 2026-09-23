@@ -2,6 +2,7 @@ package tuitui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -220,8 +221,33 @@ type normalizedInbound struct {
 	kind chatKind
 }
 
+// tuituiRawEvent is the envelope persisted into InboundMessage.Raw: the
+// platform event body plus the app_id of the connection that received it.
+// The frame itself carries no bot identity — one WebSocket per installation
+// is the routing fact — so the receive loop stamps app_id the way the
+// DingTalk connector stamps AppID, keeping the installation resolver a pure
+// DB lookup (GetChannelInstallationByAppID) instead of socket-side plumbing.
+type tuituiRawEvent struct {
+	AppID string    `json:"app_id"`
+	Body  eventBody `json:"body"`
+}
+
+// decodeTuituiRaw extracts the stamped envelope written by normalizeEvent.
+func decodeTuituiRaw(msg channel.InboundMessage) (tuituiRawEvent, error) {
+	var raw tuituiRawEvent
+	if len(msg.Raw) == 0 {
+		return tuituiRawEvent{}, errors.New("tuitui: inbound message Raw is empty")
+	}
+	if err := json.Unmarshal(msg.Raw, &raw); err != nil {
+		return tuituiRawEvent{}, fmt.Errorf("decode tuitui inbound raw: %w", err)
+	}
+	return raw, nil
+}
+
 // normalizeEvent translates one inbound chat event into the shared
-// InboundMessage shape. It returns ok=false for frames that must not reach
+// InboundMessage shape. appID is the credential of the connection the frame
+// arrived on, stamped into Raw for the installation resolver (see
+// tuituiRawEvent). It returns ok=false for frames that must not reach
 // the core: unknown events, events without a usable platform message id
 // (channel_inbound_message_dedup keys on it, and the reference uuid fallback
 // would mint a new id for every redelivery), or events without a chat id.
@@ -229,7 +255,7 @@ type normalizedInbound struct {
 // The fourth event_type is deliberately explicit (no string-shape guessing):
 // single_chat → p2p, group_chat → group, and both teams_post_* events →
 // group with a composite teams chat id, because channel.ChatType is closed.
-func normalizeEvent(frame *wsFrame) (normalizedInbound, bool) {
+func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 	body := &frame.Body
 	var ev chatKind
 	switch body.Event {
@@ -259,7 +285,7 @@ func normalizeEvent(frame *wsFrame) (normalizedInbound, bool) {
 		EventID:   frame.eventID(),
 		MessageID: msgID,
 		Type:      channel.MsgTypeText,
-		Raw:       marshalRaw(body),
+		Raw:       marshalRaw(appID, body),
 	}
 	msg.Source = channel.Source{
 		ChannelType: TypeTuitui,
@@ -459,8 +485,8 @@ func splitTeamsChatID(chatID string) (team, channelID, thread string, ok bool) {
 	return parts[0], parts[1], parts[2], true
 }
 
-func marshalRaw(body *eventBody) json.RawMessage {
-	raw, err := json.Marshal(body)
+func marshalRaw(appID string, body *eventBody) json.RawMessage {
+	raw, err := json.Marshal(tuituiRawEvent{AppID: appID, Body: *body})
 	if err != nil {
 		return nil
 	}
