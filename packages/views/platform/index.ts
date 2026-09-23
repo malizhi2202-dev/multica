@@ -5,7 +5,9 @@ export { openExternal } from "./open-external";
 export {
   isDesktopShell,
   pickDirectory,
+  resolveLocalDirectoryCapability,
   validateLocalDirectory,
+  type LocalDirectoryCapability,
   type PickDirectoryResult,
   type ValidateLocalDirectoryResult,
 } from "./local-directory";

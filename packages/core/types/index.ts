@@ -187,6 +187,9 @@ export type {
   CreateProjectResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
+  LocalDirBrowseResponse,
+  LocalDirDaemonStatus,
+  LocalDirEntry,
 } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
 export type {

@@ -86,6 +86,11 @@ export function AuthInitializer({
         configStore
           .getState()
           .setLocalWorktreeSupported(cfg.local_worktree_supported === true);
+        // Absent means the server has no browse endpoint; the web fallback
+        // must stay off rather than opening a dialog that can only 404.
+        configStore
+          .getState()
+          .setLocalDirBrowserSupported(cfg.local_dir_browser_supported === true);
         // Older agent handlers returned success while silently dropping this
         // additive field, so writes stay disabled unless the server declares
         // the persistence contract explicitly.

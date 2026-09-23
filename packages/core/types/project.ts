@@ -136,3 +136,47 @@ export interface ListProjectResourcesResponse {
   resources: ProjectResource[];
   total: number;
 }
+
+/**
+ * Which daemon the deployment server resolved for a browsed path.
+ *
+ * - `resolved`: exactly one daemon serves `path`; `daemon_id` is non-empty and
+ *   is the id a new local_directory resource must be pinned to.
+ * - `none`: no registered daemon covers the path.
+ * - `ambiguous`: several daemons could serve it; the server refuses to pick.
+ *
+ * A value outside this union (a newer backend's addition) is downgraded to
+ * `ambiguous` at the API boundary — the safe answer, since both known
+ * non-resolved states block saving.
+ */
+export type LocalDirDaemonStatus = "resolved" | "none" | "ambiguous";
+
+/** One browsable child directory of the server's own filesystem. */
+export interface LocalDirEntry {
+  name: string;
+  path: string;
+  /** Whether entering this directory would show anything (drives the affordance only). */
+  has_children: boolean;
+  /** Protected / system path: rendered but never enterable. */
+  blocked: boolean;
+}
+
+/**
+ * GET /api/workspaces/{id}/local-dirs — one level of the SERVER's filesystem,
+ * for picking a local_directory resource without the desktop app. Paths refer
+ * to the deployed machine, not the browser's.
+ */
+export interface LocalDirBrowseResponse {
+  /** Absolute path currently listed (echo of the `path` query, or the server default). */
+  path: string;
+  /** Parent to navigate up to; "" means no further parent is offered. */
+  parent: string;
+  /** Hostname of the machine whose filesystem this is. */
+  hostname: string;
+  /** Home directory of the daemon user — the "go home" target. */
+  home: string;
+  /** Resolved daemon id; "" unless `daemon_status` is "resolved". */
+  daemon_id: string;
+  daemon_status: LocalDirDaemonStatus;
+  dirs: LocalDirEntry[];
+}

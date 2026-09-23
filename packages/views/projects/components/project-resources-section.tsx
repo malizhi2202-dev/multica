@@ -47,10 +47,16 @@ import {
 import {
   isDesktopShell,
   pickDirectory,
+  resolveLocalDirectoryCapability,
   useLocalDaemonStatus,
   validateLocalDirectory,
   type ValidateLocalDirectoryResult,
 } from "../../platform";
+import {
+  LocalDirectoryBrowserDialog,
+  pathBasename,
+  type LocalDirectoryBrowserSelection,
+} from "./local-directory-browser-dialog";
 import {
   LocalDirectoryModeDialog,
   type WorktreeUnavailableReason,
@@ -123,6 +129,10 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
   const [refDialog, setRefDialog] = useState<RefDialogState | null>(null);
   const [refSaving, setRefSaving] = useState(false);
   const [refError, setRefError] = useState<string | null>(null);
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [browserSaving, setBrowserSaving] = useState(false);
+  const [browserError, setBrowserError] = useState<string | null>(null);
+  const [manualPath, setManualPath] = useState("");
 
   const { data: resources = [] } = useQuery(
     projectResourcesOptions(wsId, projectId),
@@ -131,12 +141,22 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
   const updateResource = useUpdateProjectResource(wsId, projectId);
   const deleteResource = useDeleteProjectResource(wsId, projectId);
 
-  // Desktop-only entry points. We hide (not just disable) on web so users
-  // there don't see an action they can never complete — the spec calls for
-  // read-only on web because the daemon-id check can't be performed in the
-  // browser.
-  const desktopMode = isDesktopShell();
+  // Local-directory entry points, as a capability probe rather than a
+  // platform check: the desktop native picker first (unchanged behavior),
+  // then the server's directory browse (web against a deployment that
+  // declares GET …/local-dirs), then manual path entry where a daemon id is
+  // actually known, and only then a read-only explanation. The original web
+  // restriction — "the daemon-id check can't be performed in the browser" —
+  // is answered by the server doing that check on the user's behalf.
   const localDaemonId = daemonStatus.daemonId;
+  const serverBrowserSupported = useConfigStore(
+    (state) => state.localDirBrowserSupported,
+  );
+  const localDirCapability = resolveLocalDirectoryCapability({
+    desktopPickerAvailable: isDesktopShell(),
+    serverBrowserSupported,
+    localDaemonAvailable: daemonStatus.running && localDaemonId !== null,
+  });
 
   // Only ever used to decide what to PRESELECT. Whether the machine can run
   // worktree mode is the server's call — it knows its own version, the client
@@ -271,6 +291,89 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
       toast.error(msg);
     } finally {
       setPicking(false);
+    }
+  };
+
+  /**
+   * Manual-path tier: no server browse endpoint and no native picker, but a
+   * locally registered daemon to bind the resource to. Validation is real:
+   * the desktop bridge check when it exists (`unsupported` only means this
+   * build lacks it — the daemon's save-time check is still authoritative),
+   * and everything else comes back from the server as the create's error.
+   */
+  const handleAttachManualPath = async () => {
+    const path = manualPath.trim();
+    if (!path || !localDaemonId || !daemonStatus.running) return;
+    if (attachedLocalPaths.has(path)) {
+      toast.error(t(($) => $.resources.toast_local_already_attached));
+      return;
+    }
+    if (hasLocalDirectoryForCurrentDaemon) {
+      toast.error(t(($) => $.resources.toast_local_daemon_already_attached));
+      return;
+    }
+    const validation = await validateLocalDirectory(path);
+    if (!validation.ok && validation.reason !== "unsupported") {
+      toast.error(
+        localValidationMessage(validation, {
+          not_absolute: t(($) => $.resources.local_validate_not_absolute),
+          not_found: t(($) => $.resources.local_validate_not_found),
+          not_a_directory: t(($) => $.resources.local_validate_not_a_directory),
+          not_readable: t(($) => $.resources.local_validate_not_readable),
+          not_writable: t(($) => $.resources.local_validate_not_writable),
+          unsupported: t(($) => $.resources.local_validate_unsupported),
+          fallback: t(($) => $.resources.toast_local_pick_failed),
+        }),
+      );
+      return;
+    }
+    const isGitRepo = validation.ok ? validation.is_git_repo : undefined;
+    setModeError(null);
+    setModeDialog({
+      path,
+      daemonId: localDaemonId,
+      mode:
+        isGitRepo === true &&
+        serverValidatesWorktree &&
+        advertisesWorktree(localDaemonId)
+          ? "worktree"
+          : "in_place",
+      isGitRepo,
+      label: pathBasename(path),
+    });
+    setManualPath("");
+  };
+
+  /** Server-browser tier: pin to the daemon the SERVER resolved in the dialog. */
+  const handleAttachFromServerBrowser = async (
+    selection: LocalDirectoryBrowserSelection,
+  ) => {
+    if (browserSaving) return;
+    setBrowserSaving(true);
+    setBrowserError(null);
+    try {
+      await createResource.mutateAsync({
+        resource_type: "local_directory",
+        resource_ref: {
+          local_path: selection.localPath,
+          daemon_id: selection.daemonId,
+          label: selection.label,
+          execution_mode: selection.mode,
+        },
+      });
+      toast.success(t(($) => $.resources.toast_local_attached));
+      setBrowserOpen(false);
+    } catch (err) {
+      // Keep the dialog open with the server's reason — a 409 ("this daemon
+      // already has a directory") or a rejected path is fixable from right
+      // there by picking elsewhere.
+      setBrowserError(
+        err instanceof Error && err.message
+          ? err.message
+          : t(($) => $.resources.toast_local_pick_failed),
+      );
+    } finally {
+      setBrowserSaving(false);
     }
   };
 
@@ -511,7 +614,7 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
               />
             </PopoverContent>
           </Popover>
-          {desktopMode && (
+          {localDirCapability === "desktop_picker" && (
             <div className="flex flex-col">
               <Button
                 variant="ghost"
@@ -542,7 +645,69 @@ export function ProjectResourcesSection({ projectId }: { projectId: string }) {
               )}
             </div>
           )}
+          {localDirCapability === "server_browser" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 justify-start px-2 text-caption text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setBrowserError(null);
+                setBrowserOpen(true);
+              }}
+            >
+              <FolderOpen className="size-3" />
+              {t(($) => $.resources.add_server_directory_button)}
+            </Button>
+          )}
+          {localDirCapability === "manual_path" && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleAttachManualPath();
+              }}
+              className="flex items-center gap-1.5"
+            >
+              <input
+                type="text"
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                aria-label={t(($) => $.resources.local_manual_path_aria)}
+                placeholder={t(($) => $.resources.local_browser_path_placeholder)}
+                className="h-7 min-w-0 flex-1 rounded-md border bg-transparent px-2 text-caption outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                variant="outline"
+                className="h-7 shrink-0 text-caption"
+                disabled={!manualPath.trim() || createResource.isPending}
+              >
+                {t(($) => $.resources.url_submit)}
+              </Button>
+            </form>
+          )}
+          {localDirCapability === "read_only" && (
+            <p className="px-2 pt-0.5 text-micro text-muted-foreground">
+              {t(($) => $.resources.local_read_only_hint)}
+            </p>
+          )}
         </div>
+      )}
+      {browserOpen && (
+        <LocalDirectoryBrowserDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) {
+              setBrowserOpen(false);
+              setBrowserError(null);
+            }
+          }}
+          wsId={wsId}
+          saving={browserSaving}
+          errorMessage={browserError ?? undefined}
+          confirmLabel={t(($) => $.resources.mode_add)}
+          onConfirm={(selection) => void handleAttachFromServerBrowser(selection)}
+        />
       )}
       {refDialog && (
         <GithubRefDialog

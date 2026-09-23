@@ -68,6 +68,10 @@ import {
 } from "./schemas";
 import { IssueViewSchema, IssueViewListSchema } from "./schemas";
 import {
+  LocalDirBrowseResponseSchema,
+  EMPTY_LOCAL_DIR_BROWSE_RESPONSE,
+} from "./schemas";
+import {
   ListIssueStatusesResponseSchema,
   IssueStatusEntrySchema,
   EMPTY_LIST_ISSUE_STATUSES_RESPONSE,
@@ -1257,6 +1261,89 @@ describe("AppConfigSchema local_worktree_supported drift", () => {
       local_worktree_supported: true,
     });
     expect(parsed.local_worktree_supported).toBe(true);
+  });
+});
+
+describe("AppConfigSchema local_dir_browser_supported drift", () => {
+  it("defaults to false when the server predates the browse endpoint", () => {
+    const parsed = AppConfigSchema.parse({ cdn_domain: "cdn.example.com" });
+    expect(parsed.local_dir_browser_supported).toBe(false);
+  });
+
+  it("coerces a malformed value to false rather than trusting it", () => {
+    const parsed = AppConfigSchema.parse({
+      cdn_domain: "cdn.example.com",
+      local_dir_browser_supported: "yes",
+    });
+    expect(parsed.local_dir_browser_supported).toBe(false);
+  });
+
+  it("carries a genuine true through", () => {
+    const parsed = AppConfigSchema.parse({
+      cdn_domain: "cdn.example.com",
+      local_dir_browser_supported: true,
+    });
+    expect(parsed.local_dir_browser_supported).toBe(true);
+  });
+});
+
+describe("LocalDirBrowseResponseSchema", () => {
+  const VALID = {
+    path: "/home/malizhi/project",
+    parent: "/home/malizhi",
+    hostname: "77220d771381",
+    home: "/home/malizhi",
+    daemon_id: "01a0c304-922a-7656-b761-20cbefa307b3",
+    daemon_status: "resolved",
+    dirs: [
+      { name: "multica", path: "/home/malizhi/project/multica", has_children: true, blocked: false },
+    ],
+  };
+
+  it("parses the documented contract unchanged", () => {
+    expect(LocalDirBrowseResponseSchema.parse(VALID)).toEqual(VALID);
+  });
+
+  // A newer backend adding a status must never crash the dialog or be
+  // guessed as safe: the catch downgrades it to `ambiguous`, the one answer
+  // that both renders and blocks saving.
+  it("downgrades an unknown daemon_status to ambiguous and keeps the listing", () => {
+    const parsed = LocalDirBrowseResponseSchema.parse({
+      ...VALID,
+      daemon_status: "resolved_by_hint",
+    });
+    expect(parsed.daemon_status).toBe("ambiguous");
+    expect(parsed.dirs).toHaveLength(1);
+    expect(parsed.path).toBe(VALID.path);
+  });
+
+  it("defaults missing fields to a safe, save-blocking shape", () => {
+    const parsed = LocalDirBrowseResponseSchema.parse({});
+    expect(parsed.daemon_status).toBe("ambiguous");
+    expect(parsed.daemon_id).toBe("");
+    expect(parsed.parent).toBe("");
+    expect(parsed.dirs).toEqual([]);
+  });
+
+  // `blocked` is the security gate on system paths: an entry the server
+  // forgot to classify renders as protected rather than inviting the user in.
+  it("fail-closes a malformed or missing blocked flag", () => {
+    const parsed = LocalDirBrowseResponseSchema.parse({
+      ...VALID,
+      dirs: [{ name: "etc", path: "/etc", has_children: true }],
+    });
+    expect(parsed.dirs[0]?.blocked).toBe(true);
+  });
+
+  it("degrades a wholly unreadable response to the fallback via parseWithFallback", () => {
+    const out = parseWithFallback(
+      { dirs: "not-a-list" },
+      LocalDirBrowseResponseSchema,
+      EMPTY_LOCAL_DIR_BROWSE_RESPONSE,
+      { endpoint: "test GET local-dirs" },
+    );
+    expect(out).toEqual(EMPTY_LOCAL_DIR_BROWSE_RESPONSE);
+    expect(out.daemon_status).toBe("ambiguous");
   });
 });
 

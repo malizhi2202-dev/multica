@@ -134,7 +134,8 @@ vi.mock("../projects/components/project-due-date-picker", () => ({
 }));
 
 // Desktop-only surface: without these the Local directory tab never renders.
-vi.mock("../platform/local-directory", () => ({
+vi.mock("../platform/local-directory", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   isDesktopShell: () => true,
   pickDirectory: () =>
     Promise.resolve({ ok: true, path: "/Users/dev/work/game-client", basename: "game-client" }),

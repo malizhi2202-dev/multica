@@ -13,6 +13,37 @@ export const projectResourceKeys = {
     [...projectKeys.detail(wsId, projectId), "resources"] as const,
 };
 
+/** Workspace-scoped: the browse endpoint lives under /api/workspaces/{id}. */
+export const localDirBrowseKeys = {
+  browse: (wsId: string, path: string | null, includeHidden: boolean) =>
+    ["workspaces", wsId, "local-dirs", { path, includeHidden }] as const,
+};
+
+/**
+ * One level of the deployment machine's filesystem. The path is part of the
+ * key so navigating up/down/home is just another query, and back-and-forth
+ * navigation hits the cache. staleTime mirrors the other probe-the-machine
+ * reads (runtimes/local-skills.ts): the listing changes out of band, so
+ * re-opening a dialog after half a minute should refetch, but rapid
+ * navigation inside a session should not hammer the server.
+ */
+export function localDirBrowseOptions(
+  wsId: string,
+  params: { path?: string; includeHidden?: boolean } = {},
+) {
+  const path = params.path ?? null;
+  const includeHidden = params.includeHidden ?? false;
+  return queryOptions({
+    queryKey: localDirBrowseKeys.browse(wsId, path, includeHidden),
+    queryFn: () =>
+      api.browseLocalDirs(wsId, {
+        path: path ?? undefined,
+        includeHidden,
+      }),
+    staleTime: 30_000,
+  });
+}
+
 export function projectResourcesOptions(wsId: string, projectId: string) {
   return queryOptions({
     queryKey: projectResourceKeys.list(wsId, projectId),

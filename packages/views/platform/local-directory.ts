@@ -53,6 +53,44 @@ export function isDesktopShell(): boolean {
   return typeof api?.pickDirectory === "function";
 }
 
+/**
+ * Which way the current context can actually complete a local_directory pick.
+ *
+ * `desktop_picker` — the preload native folder picker (the original desktop
+ * path). `server_browser` — the deployment server exposes its own filesystem
+ * via GET /api/workspaces/{id}/local-dirs and resolves the daemon id there.
+ * `manual_path` — type an absolute path; a locally registered daemon is the
+ * one the resource gets pinned to, and the server's own save-time checks are
+ * the validation. `read_only` — nothing in this environment can produce the
+ * daemon_id the resource must be bound to, so offer no dead-end button.
+ */
+export type LocalDirectoryCapability =
+  | "desktop_picker"
+  | "server_browser"
+  | "manual_path"
+  | "read_only";
+
+/**
+ * Resolves the strongest available capability. Like `isDesktopShell()` this
+ * is a capability probe, not a platform check: each tier is answered by a
+ * live signal (preload bridge, server-declared boolean, daemon status), so a
+ * desktop build never loses its native picker when the server gains the
+ * browse endpoint, and a web build gains one the moment the server declares
+ * it. Preference order is deliberate — native first (best UX, fully offline),
+ * server browser second (works from any browser, but depends on the
+ * deployment's filesystem), manual last (only viable with a local daemon).
+ */
+export function resolveLocalDirectoryCapability(input: {
+  desktopPickerAvailable: boolean;
+  serverBrowserSupported: boolean;
+  localDaemonAvailable: boolean;
+}): LocalDirectoryCapability {
+  if (input.desktopPickerAvailable) return "desktop_picker";
+  if (input.serverBrowserSupported) return "server_browser";
+  if (input.localDaemonAvailable) return "manual_path";
+  return "read_only";
+}
+
 export async function pickDirectory(
   defaultPath?: string,
 ): Promise<PickDirectoryResult> {

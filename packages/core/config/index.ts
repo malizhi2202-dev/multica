@@ -32,6 +32,11 @@ interface ConfigState {
   // predate this signal are caught by the same net — indistinguishable from
   // here, and only one of the two answers is safe to guess.
   localWorktreeSupported: boolean;
+  // Whether the connected server serves GET /api/workspaces/{id}/local-dirs,
+  // i.e. the web fallback for the desktop directory picker exists. Servers
+  // without the endpoint must not get a browse UI that can only 404, so an
+  // absent declaration fails closed.
+  localDirBrowserSupported: boolean;
   // Whether this server persists conversation_starters on agent create/update.
   // Older handlers accepted the unknown field and returned success while
   // dropping it, so absent must fail closed.
@@ -54,6 +59,7 @@ interface ConfigState {
   setFeatureFlags: (flags?: Record<string, boolean>) => void;
   setServerVersion: (version?: string) => void;
   setLocalWorktreeSupported: (supported?: boolean) => void;
+  setLocalDirBrowserSupported: (supported?: boolean) => void;
   setAgentConversationStartersSupported: (supported?: boolean) => void;
   setCommentDeleteKeepRepliesSupported: (supported?: boolean) => void;
 }
@@ -70,6 +76,7 @@ export const configStore = createStore<ConfigState>((set) => ({
   featureFlags: {},
   serverVersion: "",
   localWorktreeSupported: false,
+  localDirBrowserSupported: false,
   agentConversationStartersSupported: false,
   commentDeleteKeepRepliesSupported: false,
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
@@ -85,6 +92,8 @@ export const configStore = createStore<ConfigState>((set) => ({
   setServerVersion: (version = "") => set({ serverVersion: version }),
   setLocalWorktreeSupported: (supported = false) =>
     set({ localWorktreeSupported: supported === true }),
+  setLocalDirBrowserSupported: (supported = false) =>
+    set({ localDirBrowserSupported: supported === true }),
   setAgentConversationStartersSupported: (supported = false) =>
     set({ agentConversationStartersSupported: supported === true }),
   setCommentDeleteKeepRepliesSupported: (supported = false) =>

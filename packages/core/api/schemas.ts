@@ -50,6 +50,7 @@ import type {
   InboxItem,
   InboxWorkspaceUnread,
   Label,
+  LocalDirBrowseResponse,
   MemberWithUser,
   IssueProperty,
   ListPropertiesResponse,
@@ -753,6 +754,12 @@ export interface AppConfigResponse {
    * signal do validate but cannot say so, and are treated as unable: the client
    * has no way to tell them apart, and only one of the two answers is safe. */
   local_worktree_supported?: boolean;
+  /** Whether this server exposes GET /api/workspaces/{id}/local-dirs, i.e.
+   * browsing the DEPLOYMENT machine's filesystem from the browser as the
+   * fallback for the desktop app's native directory picker. Absent on every
+   * server that predates the endpoint, where the browse UI must not appear —
+   * the request would only 404. */
+  local_dir_browser_supported?: boolean;
   /** Whether agent create/update persists `conversation_starters`. Older servers
    * silently ignored the unknown field, so absent must be treated as false. */
   agent_conversation_starters_supported?: boolean;
@@ -1003,6 +1010,7 @@ export const AppConfigSchema = z.object({
   vcs_integration_available: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
   local_worktree_supported: BooleanWithDefaultSchema(false),
+  local_dir_browser_supported: BooleanWithDefaultSchema(false),
   agent_conversation_starters_supported: BooleanWithDefaultSchema(false),
   comment_delete_keep_replies_supported: BooleanWithDefaultSchema(false),
   server_version: OptionalStringSchema,
@@ -1020,6 +1028,9 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   // Fail closed: an unreadable config must not look like a server that
   // validates execution_mode.
   local_worktree_supported: false,
+  // Fail closed: a server that cannot say it serves the browse endpoint must
+  // not get a browser for it.
+  local_dir_browser_supported: false,
   // Fail closed: old servers returned success while dropping the field.
   agent_conversation_starters_supported: false,
   // Fail closed: old servers delete a comment's replies with it.
@@ -3513,3 +3524,54 @@ export const RuntimeProfileSchema = z
     runtime_type: profile.runtime_type || profile.protocol_family,
   }));
 export const RuntimeProfileListSchema = z.array(RuntimeProfileSchema);
+
+// ---------------------------------------------------------------------------
+// GET /api/workspaces/{id}/local-dirs — browsing the DEPLOYMENT machine's
+// filesystem so web users can attach a local_directory resource without the
+// desktop app. The listing changes under the server's own feet (people create
+// folders out of band), so every field is defensive: a malformed entry or a
+// daemon_status value this client has never seen must degrade to a safe UI,
+// not blank the dialog.
+// ---------------------------------------------------------------------------
+
+/**
+ * Server enum with a safe downgrade instead of a parse failure: an unknown
+ * value collapses to "ambiguous", which (like "none" and, in practice, the
+ * empty `daemon_id` it forbids) blocks saving. "resolved" is the only status
+ * the confirm button trusts, so guessing anything else in its place would let
+ * a resource be pinned to a daemon id the server never committed to.
+ */
+const LocalDirDaemonStatusSchema = z
+  .enum(["resolved", "none", "ambiguous"])
+  .catch("ambiguous");
+
+export const LocalDirEntrySchema = z.object({
+  name: z.string().default(""),
+  path: z.string().default(""),
+  has_children: BooleanWithDefaultSchema(false),
+  // Fail closed: an entry the server forgot to classify renders as protected
+  // rather than inviting the user into a system path.
+  blocked: BooleanWithDefaultSchema(true),
+}).loose();
+
+export const LocalDirBrowseResponseSchema = z.object({
+  path: z.string().default(""),
+  // "" means "no parent to offer" per the contract; a missing field must not
+  // crash the up-button, and "" is exactly that answer.
+  parent: z.string().default(""),
+  hostname: z.string().default(""),
+  home: z.string().default(""),
+  daemon_id: z.string().default(""),
+  daemon_status: LocalDirDaemonStatusSchema,
+  dirs: z.array(LocalDirEntrySchema).default([]),
+}).loose();
+
+export const EMPTY_LOCAL_DIR_BROWSE_RESPONSE: LocalDirBrowseResponse = {
+  path: "",
+  parent: "",
+  hostname: "",
+  home: "",
+  daemon_id: "",
+  daemon_status: "ambiguous",
+  dirs: [],
+};

@@ -53,7 +53,8 @@ vi.mock("@multica/core/hooks", () => ({ useWorkspaceId: () => "workspace-1" }));
 vi.mock("@multica/core/paths", () => ({
   useCurrentWorkspace: () => ({ id: "workspace-1", slug: "ws", repos: [] }),
 }));
-vi.mock("../../platform/local-directory", () => ({
+vi.mock("../../platform/local-directory", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   isDesktopShell: () => true,
   pickDirectory: vi.fn(),
   validateLocalDirectory: vi.fn(),

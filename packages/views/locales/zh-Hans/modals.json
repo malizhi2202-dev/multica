@@ -136,7 +136,10 @@
     "local_pick_failed": "无法打开目录选择器。",
     "local_invalid_dir": "该目录不可用，请重新选择。",
     "local_hint": "其他机器上的智能体看不到这个路径，会启动失败。需要协作请用仓库模式。",
-    "repos_ref_default": "默认分支"
+    "repos_ref_default": "默认分支",
+    "local_heading_server": "使用部署机上的目录",
+    "local_on_server": "目录由部署机提供，保存前由服务端解析对应的守护进程。",
+    "local_pick_server": "选择部署机上的目录…"
   },
   "create_issue": {
     "sr_manual": "新建任务",

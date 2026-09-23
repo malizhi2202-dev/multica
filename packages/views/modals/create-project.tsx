@@ -69,6 +69,7 @@ import {
 import {
   isDesktopShell,
   pickDirectory,
+  resolveLocalDirectoryCapability,
   validateLocalDirectory,
 } from "../platform/local-directory";
 import { useLocalDaemonStatus } from "../platform/use-local-daemon-status";
@@ -79,6 +80,11 @@ import {
 import { useConfigStore } from "@multica/core/config";
 import type { LocalDirectoryExecutionMode } from "@multica/core/types";
 import { LocalDirectoryModeOptions } from "../projects/components/local-directory-mode-dialog";
+import {
+  LocalDirectoryBrowserDialog,
+  pathBasename,
+  type LocalDirectoryBrowserSelection,
+} from "../projects/components/local-directory-browser-dialog";
 
 /**
  * Builds the resource_ref for a local directory attached during project
@@ -191,14 +197,34 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   // gets persisted on submit; switching mode does NOT clear the other
   // side's stash, so toggling back and forth restores the user's prior
   // selection. Only the mode-matching side is sent to the API. Local mode
-  // is hidden entirely on web (no daemon to bind the path to).
+  // follows the capability probe: native desktop picker first, then the
+  // server's directory browse (web against a deployment that declares it),
+  // then manual entry where a daemon is known — and only when nothing could
+  // complete the binding is local mode hidden.
   const desktop = isDesktopShell();
   const daemonStatus = useLocalDaemonStatus();
+  const serverBrowserSupported = useConfigStore(
+    (state) => state.localDirBrowserSupported,
+  );
+  const localCapability = resolveLocalDirectoryCapability({
+    desktopPickerAvailable: desktop,
+    serverBrowserSupported,
+    localDaemonAvailable: daemonStatus.running && daemonStatus.daemonId !== null,
+  });
   const [sourceMode, setSourceMode] = useState<"repos" | "local">("repos");
   const [selectedLocalPath, setSelectedLocalPath] = useState<string | null>(null);
   const [selectedLocalLabel, setSelectedLocalLabel] = useState<string | null>(null);
   const [localPickError, setLocalPickError] = useState<string | null>(null);
   const [localPicking, setLocalPicking] = useState(false);
+  // Server-browser tier: the daemon the deployment resolved for the picked
+  // path, plus the mode chosen in the browser dialog. There is no local
+  // daemon on this tier, so these replace `daemonStatus` at submit time.
+  const [serverLocalBrowserOpen, setServerLocalBrowserOpen] = useState(false);
+  const [serverLocalDaemonId, setServerLocalDaemonId] = useState<string | null>(null);
+  // The daemon a local_directory resource from this modal binds to: the
+  // desktop's own, or — on the server-browser tier, where there is no local
+  // daemon — the one the browse endpoint resolved for the picked path.
+  const localSourceDaemonId = daemonStatus.daemonId ?? serverLocalDaemonId;
   // Execution mode is chosen here rather than after creation: it decides
   // whether tasks edit this folder or hand back a branch, which is part of
   // what the user is setting up, not a setting to discover later.
@@ -301,6 +327,40 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
     setLocalPickError(null);
     setLocalIsGitRepo(undefined);
     setLocalMode(null);
+    setServerLocalDaemonId(null);
+  };
+
+  /** Server-browser tier: the dialog resolved path, daemon and mode together. */
+  const handleServerLocalConfirm = (selection: LocalDirectoryBrowserSelection) => {
+    setSelectedLocalPath(selection.localPath);
+    setSelectedLocalLabel(selection.label);
+    setServerLocalDaemonId(selection.daemonId);
+    setLocalMode(selection.mode);
+    // Git-ness of a server-side folder cannot be checked from here, and
+    // unknown stays permissive — the daemon decides on save.
+    setLocalIsGitRepo(undefined);
+    setLocalPickError(null);
+    setServerLocalBrowserOpen(false);
+  };
+
+  /** Manual tier: typed path, bridge-validated when the bridge exists. */
+  const [manualPathInput, setManualPathInput] = useState("");
+  const handleManualLocalAdd = async () => {
+    const path = manualPathInput.trim();
+    if (!path) return;
+    const validation = await validateLocalDirectory(path);
+    if (!validation.ok && validation.reason !== "unsupported") {
+      setLocalPickError(
+        validation.error ?? t(($) => $.create_project.local_invalid_dir),
+      );
+      return;
+    }
+    setSelectedLocalPath(path);
+    setSelectedLocalLabel(pathBasename(path));
+    setLocalIsGitRepo(validation.ok ? validation.is_git_repo : undefined);
+    setServerLocalDaemonId(null);
+    setLocalPickError(null);
+    setManualPathInput("");
   };
 
   // Sync field changes to draft store
@@ -361,14 +421,17 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
     } else if (
       sourceMode === "local" &&
       selectedLocalPath &&
-      daemonStatus.daemonId
+      // Two sources for the same binding: the desktop's own daemon, or the
+      // one the server's browse endpoint resolved for a picked path. Exactly
+      // one of them is non-null in a tier that can show local mode at all.
+      localSourceDaemonId
     ) {
       resources = [
         {
           resource_type: "local_directory" as const,
           resource_ref: buildLocalDirectoryResourceRef({
             localPath: selectedLocalPath,
-            daemonId: daemonStatus.daemonId,
+            daemonId: localSourceDaemonId,
             label: selectedLocalLabel,
             mode: effectiveLocalMode,
           }),
@@ -457,6 +520,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
+    <>
     <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
       <DialogContent
         showCloseButton={false}
@@ -755,10 +819,12 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
             />
             <PopoverContent side="top" align="start" className="w-72 p-2 space-y-2">
               {/* Source mode is binary — repo OR local directory, never both.
-                  Local option is desktop-only because a local_directory
-                  resource has to be pinned to a daemon_id, which doesn't
-                  exist on the web. */}
-              {desktop && (
+                  Shown whenever any capability tier can complete the binding:
+                  the desktop picker, the server's directory browse (the
+                  daemon_id comes from the server's answer), or manual entry
+                  against a registered daemon. `read_only` keeps the historic
+                  web behavior — no local option rather than a dead end. */}
+              {localCapability !== "read_only" && (
                 <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/60 p-0.5">
                   <button
                     type="button"
@@ -938,13 +1004,20 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
               ) : (
                 <>
                   <div className="text-caption font-medium text-muted-foreground">
-                    {t(($) => $.create_project.local_heading)}
+                    {localCapability === "server_browser"
+                      ? t(($) => $.create_project.local_heading_server)
+                      : t(($) => $.create_project.local_heading)}
                   </div>
-                  {/* Daemon must be online — daemon_id is required to bind
-                      the resource. If it's offline, surface why and disable
-                      the picker; once it boots we re-render automatically
-                      via useLocalDaemonStatus. */}
-                  {daemonStatus.daemonId && daemonStatus.running ? (
+                  {/* Which daemon will be bound, and whether it is reachable:
+                      the local one must be online for the desktop/manual
+                      tiers (surface why and disable the picker; once it boots
+                      we re-render via useLocalDaemonStatus); the server tier
+                      resolves the daemon inside the browse flow itself. */}
+                  {localCapability === "server_browser" ? (
+                    <p className="text-micro text-muted-foreground">
+                      {t(($) => $.create_project.local_on_server)}
+                    </p>
+                  ) : daemonStatus.daemonId && daemonStatus.running ? (
                     <p className="text-micro text-muted-foreground">
                       {t(($) => $.create_project.local_on_device, {
                         device: daemonStatus.deviceName ?? t(($) => $.create_project.local_this_machine),
@@ -1022,8 +1095,18 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                           size="sm"
                           variant="ghost"
                           className="h-6 flex-1 min-w-0 text-caption"
-                          onClick={handlePickLocalDirectory}
-                          disabled={localPicking || !daemonStatus.running}
+                          onClick={() => {
+                            if (localCapability === "server_browser") {
+                              setServerLocalBrowserOpen(true);
+                              return;
+                            }
+                            void handlePickLocalDirectory();
+                          }}
+                          disabled={
+                            localCapability === "server_browser"
+                              ? false
+                              : localPicking || !daemonStatus.running
+                          }
                         >
                           <span className="truncate">
                             {t(($) => $.create_project.local_change)}
@@ -1031,6 +1114,43 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
                         </Button>
                       </div>
                     </div>
+                  ) : localCapability === "server_browser" ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="w-full text-caption"
+                      onClick={() => setServerLocalBrowserOpen(true)}
+                    >
+                      <FolderOpen className="size-3" />
+                      {t(($) => $.create_project.local_pick_server)}
+                    </Button>
+                  ) : localCapability === "manual_path" ? (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void handleManualLocalAdd();
+                      }}
+                      className="flex items-center gap-1.5"
+                    >
+                      <input
+                        type="text"
+                        value={manualPathInput}
+                        onChange={(e) => setManualPathInput(e.target.value)}
+                        aria-label={tProjects(($) => $.resources.local_manual_path_aria)}
+                        placeholder={tProjects(($) => $.resources.local_browser_path_placeholder)}
+                        className="h-8 min-w-0 flex-1 rounded-md border bg-transparent px-2 text-caption outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+                      />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 shrink-0 text-caption"
+                        disabled={!manualPathInput.trim()}
+                      >
+                        {tProjects(($) => $.resources.url_submit)}
+                      </Button>
+                    </form>
                   ) : (
                     <Button
                       type="button"
@@ -1107,5 +1227,21 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
         </div>
       </DialogContent>
     </Dialog>
+    {/* Mounted beside the outer Dialog, not inside it: a second modal trap
+        nested in the first's content fights over focus. The confirm seeds
+        path + label + mode + the server-resolved daemon id; the project and
+        its resource still go out in the single create call. */}
+    {serverLocalBrowserOpen && (
+      <LocalDirectoryBrowserDialog
+        open
+        onOpenChange={(next) => {
+          if (!next) setServerLocalBrowserOpen(false);
+        }}
+        wsId={wsId}
+        confirmLabel={tProjects(($) => $.resources.mode_add)}
+        onConfirm={handleServerLocalConfirm}
+      />
+    )}
+    </>
   );
 }

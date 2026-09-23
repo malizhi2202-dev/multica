@@ -138,7 +138,10 @@
     "local_pick_failed": "Could not open the directory picker.",
     "local_invalid_dir": "This directory can't be used. Pick another.",
     "local_hint": "Agents on other machines won't see this path — they'll fail to start. Use repos for shared work.",
-    "repos_ref_default": "Default branch"
+    "repos_ref_default": "Default branch",
+    "local_heading_server": "Use a directory on the deployment server",
+    "local_on_server": "The server lists its own directories and resolves which daemon serves them.",
+    "local_pick_server": "Choose directory on the server…"
   },
   "create_issue": {
     "sr_manual": "New Issue",

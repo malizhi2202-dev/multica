@@ -15,6 +15,8 @@ export {
 export {
   projectResourceKeys,
   projectResourcesOptions,
+  localDirBrowseKeys,
+  localDirBrowseOptions,
   useCreateProjectResource,
   useUpdateProjectResource,
   useDeleteProjectResource,

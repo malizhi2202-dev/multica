@@ -105,6 +105,7 @@ import type {
   CreateProjectResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
+  LocalDirBrowseResponse,
   Label,
   IssueProperty,
   IssuePropertyValue,
@@ -299,6 +300,8 @@ import {
   EMPTY_WEBHOOK_DELIVERY,
   AppConfigSchema,
   type AppConfigResponse,
+  EMPTY_LOCAL_DIR_BROWSE_RESPONSE,
+  LocalDirBrowseResponseSchema,
   type RefreshSessionResponse,
   RefreshSessionResponseSchema,
   EMPTY_REFRESH_SESSION_RESPONSE,
@@ -2800,6 +2803,34 @@ export class ApiClient {
       method: "PATCH",
       body: JSON.stringify(data),
     });
+  }
+
+  /**
+   * One level of the DEPLOYMENT machine's filesystem, for attaching a
+   * local_directory resource from the browser without the desktop picker.
+   * owner/admin only — a non-resolving 403 is the caller's problem to render,
+   * so nothing here swallows it. `path` must be absolute; omitting it asks
+   * the server for its default listing (the daemon user's home). The
+   * resolved `daemon_id` in the response is what a created resource must be
+   * pinned to — never a browser-local daemon id, which does not exist here.
+   */
+  async browseLocalDirs(
+    workspaceId: string,
+    params?: { path?: string; includeHidden?: boolean },
+  ): Promise<LocalDirBrowseResponse> {
+    const search = new URLSearchParams();
+    if (params?.path) search.set("path", params.path);
+    if (params?.includeHidden) search.set("include_hidden", "1");
+    const query = search.toString();
+    const raw = await this.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/local-dirs${query ? `?${query}` : ""}`,
+    );
+    return parseWithFallback<LocalDirBrowseResponse>(
+      raw,
+      LocalDirBrowseResponseSchema,
+      EMPTY_LOCAL_DIR_BROWSE_RESPONSE,
+      { endpoint: "GET /api/workspaces/{id}/local-dirs" },
+    );
   }
 
   async listPluginInstallations(workspaceId: string): Promise<PluginInstallationListResponse> {
