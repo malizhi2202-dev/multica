@@ -33,6 +33,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/integrations/telegram"
+	"github.com/multica-ai/multica/server/internal/integrations/tuitui"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -396,6 +397,15 @@ func seatCapacityExecutor(cloudURL string) seatcapacity.Executor {
 // NewRouter shim) discard the second value.
 func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb redis.UniversalClient, opts RouterOptions) (chi.Router, *handler.Handler) {
 	queries := db.New(pool)
+	// The stored integration DEK lives in the database, so a router assembled
+	// without a pool — the request-shape tests — has no key source at all rather
+	// than a query that would panic on a nil pool. Every integration block then
+	// logs "no master key available" and stays unwired, which is what an unset
+	// env variable already meant.
+	dekQueries := queries
+	if pool == nil {
+		dekQueries = nil
+	}
 	emailSvc := service.NewEmailService()
 	daemonHub := opts.DaemonHub
 	if daemonHub == nil {
@@ -551,7 +561,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		opts,
 	)
 
-	// Lark integration. Only wired when MULTICA_LARK_SECRET_KEY is set:
+	// Lark integration. Only wired when a master key is available
+	// (MULTICA_LARK_SECRET_KEY, else the stored integration DEK):
 	// the InstallationService refuses to fall back to plaintext storage
 	// for app_secret, and the BindingTokenService cannot mint usable
 	// tokens without it either. When the key is absent the Lark
@@ -559,195 +570,191 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// continues to start so self-host deployments that have not opted
 	// in to Lark are unaffected. Feishu registers its Factory + ResolverSet
 	// into the channel engine above.
-	if larkKey, err := secretbox.LoadKey("MULTICA_LARK_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(larkKey)
+	if larkSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_LARK_SECRET_KEY", dekQueries); err == nil {
+		box := larkSecret.Box
+		installSvc, err := lark.NewInstallationService(queries, box)
 		if err != nil {
-			slog.Error("lark: secretbox.New failed; lark integration disabled", "error", err)
+			slog.Error("lark: InstallationService init failed; lark integration disabled", "error", err)
 		} else {
-			installSvc, err := lark.NewInstallationService(queries, box)
-			if err != nil {
-				slog.Error("lark: InstallationService init failed; lark integration disabled", "error", err)
+			h.LarkInstallations = installSvc
+			h.LarkBindingTokens = lark.NewBindingTokenService(queries, pool)
+			slog.Info("lark integration enabled")
+
+			// APIClient: wire the real Lark Open Platform HTTP client
+			// (IM v1 send/patch + binding-prompt + bot info). Setting
+			// The master key is the operator's opt-in for
+			// the integration as a whole; we don't expose a separate
+			// "HTTP enabled" knob because the inbound dispatcher
+			// without outbound replies is not a useful production
+			// state, and CI / integration tests that want to avoid
+			// real Lark traffic can point MULTICA_LARK_HTTP_BASE_URL
+			// at a mock server.
+			//
+			// MULTICA_LARK_HTTP_BASE_URL is an OPTIONAL deployment-wide
+			// override. Normal operation leaves it empty: each call then
+			// resolves its open-platform host from the installation's
+			// region (open.feishu.cn vs open.larksuite.com), so one
+			// deployment serves both clouds. Set it only to force every
+			// installation onto one host — a proxy, a mock for tests, or
+			// a single-cloud staging setup.
+			larkClient := lark.NewHTTPAPIClient(lark.HTTPClientConfig{
+				BaseURL: strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
+				Logger:  slog.Default(),
+			})
+			h.LarkAPIClient = larkClient
+
+			// Channel-backed store: routes the lark package's DB seams
+			// onto the channel_* tables (MUL-3515). Interface-wired
+			// consumers (patcher, typing indicator, dispatcher, hub,
+			// backfills) take it directly; the constructor-based services
+			// wrap *db.Queries internally, so they keep taking queries.
+			cs := lark.NewChannelStore(queries)
+			patcher := lark.NewPatcher(cs, installSvc, larkClient, lark.PatcherConfig{})
+			patcher.Register(bus)
+
+			// Typing indicator: shows a "processing" reaction on the user's
+			// message while the agent is working, then removes it before the
+			// reply is sent. Best-effort; failures are logged only.
+			typingIndicator := lark.NewTypingIndicatorManager(larkClient, installSvc, cs, slog.Default())
+			patcher.SetTypingIndicatorManager(typingIndicator)
+
+			// Inbound pipeline seams: lark_inbound_audit logger and the
+			// shared channel-agnostic chat-session service. They back the
+			// Feishu ResolverSet that the engine.Router runs through,
+			// sharing the same IssueService + TaskService that back HTTP, so
+			// /issue-created issues share counter, dup guard, project
+			// boundary, broadcast, analytics and agent-enqueue with the rest
+			// of the product. Feishu is just another consumer of the shared
+			// engine.ChatSession (channel_type-keyed); the Lark session
+			// titles preserve the pre-cutover wording.
+			auditLogger := lark.NewAuditLogger(queries)
+			feishuSession := engine.NewChatSession(queries, pool, channel.TypeFeishu, engine.SessionTitles{
+				Group:    "Lark group chat",
+				Direct:   "Lark direct message",
+				Fallback: "Lark chat",
+			})
+
+			// OutcomeReplier wires the outbound side: NeedsBinding /
+			// AgentOffline / AgentArchived / issue-created translate to a
+			// Lark-side reply card. Requires the real APIClient and the
+			// binding token service; otherwise it falls back to the noop
+			// replier (outcomes logged, not delivered). We only register
+			// it on the ResolverSet when it can actually deliver, so a
+			// pre-outbound deployment pays no reply-goroutine cost.
+			replier := lark.NewLarkOutcomeReplier(lark.OutcomeReplierConfig{
+				APIClient:   larkClient,
+				BindingSvc:  h.LarkBindingTokens,
+				Credentials: installSvc,
+				Queries:     queries,
+				AppURL:      appURLFromEnv(),
+				Logger:      slog.Default(),
+			})
+			var resolverReplier lark.OutcomeReplier
+			if larkClient.IsConfigured() {
+				resolverReplier = replier
+			}
+
+			// Feishu adapter (MUL-3620): the WSLongConnConnector talks
+			// Lark's long-conn protocol over gorilla/websocket and wraps
+			// every read with a ctx-cancel watchdog so lease loss /
+			// shutdown breaks the blocking ReadMessage in bounded time —
+			// the invariant §4.4 leans on. If the endpoint fetcher fails
+			// to initialize (bad MULTICA_LARK_CALLBACK_BASE_URL or
+			// similar), buildLarkConnector logs and falls back to the
+			// NoopConnector so the lease / supervisor lifecycle still runs
+			// against real DB rows — inbound messages are silently dropped
+			// until the config is fixed, with the boot log labelling the
+			// mode "noop".
+			//
+			// Registering the Factory (connect/send) + ResolverSet
+			// (inbound pipeline seams) is all it takes to add the platform
+			// to the engine — no engine edit.
+			connector, connectorLabel := buildLarkConnector(installSvc, larkClient)
+			lark.RegisterFeishu(channelRegistry, lark.FeishuChannelDeps{
+				Connector:   connector,
+				APIClient:   larkClient,
+				Credentials: installSvc,
+				Logger:      slog.Default(),
+			})
+			mediaResolver := lark.NewFeishuMediaResolver(larkClient, installSvc, store, engine.NewDBMediaIntentLedger(queries), slog.Default())
+			channelRouter.Register(channel.TypeFeishu, lark.NewFeishuResolverSet(
+				cs, feishuSession, auditLogger, resolverReplier, typingIndicator, mediaResolver,
+			))
+			slog.Info("lark inbound pipeline wired", "connector", connectorLabel)
+
+			// One-shot union_id backfill for installations created
+			// before migration 112 added bot_union_id. Runs off the
+			// hot startup path so a slow Lark round-trip cannot block
+			// HTTP listener boot. New installs already write
+			// bot_union_id during the device-flow finalize, so this
+			// is bridge code — it will simply find no rows to update
+			// on a fresh deployment and exit. MUL-2671.
+			go lark.BackfillBotUnionIDs(context.Background(), cs, larkClient, installSvc, slog.Default())
+
+			// Upgrade repair for deployments that ran the whole
+			// integration against Lark international via the deployment-
+			// wide base-URL override before per-installation region
+			// existed: migration 116 backfilled their rows to 'feishu',
+			// so relabel them to 'lark' (their true cloud) before the
+			// operator clears the override. No-op on mainland / fresh
+			// deployments. Off the hot startup path like the union_id
+			// backfill. MUL-3083.
+			go lark.BackfillRegionFromLegacyOverride(context.Background(), cs,
+				strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
+				strings.TrimSpace(os.Getenv("MULTICA_LARK_CALLBACK_BASE_URL")),
+				slog.Default())
+
+			// Device-flow registration service: end-to-end install
+			// pipeline that talks to accounts.feishu.cn (RFC 8628)
+			// for the QR-scan handshake and then commits the
+			// resulting Bot credentials + the installer's
+			// lark_user_binding in one DB transaction. The optional
+			// MULTICA_LARK_REGISTRATION_DOMAIN / _LARK_DOMAIN env
+			// vars override the protocol hosts for staging / dev.
+			regCfg := lark.RegistrationConfig{
+				Domain:     strings.TrimSpace(os.Getenv("MULTICA_LARK_REGISTRATION_DOMAIN")),
+				LarkDomain: strings.TrimSpace(os.Getenv("MULTICA_LARK_REGISTRATION_LARK_DOMAIN")),
+			}
+			regClient := lark.NewRegistrationClient(regCfg)
+			regSvc, rerr := lark.NewRegistrationService(
+				lark.RegistrationServiceConfig{Logger: slog.Default()},
+				regClient,
+				larkClient,
+				queries,
+				pool,
+				installSvc,
+				h.LarkBindingTokens,
+			)
+			if rerr != nil {
+				slog.Error("lark: RegistrationService init failed; install disabled", "error", rerr)
 			} else {
-				h.LarkInstallations = installSvc
-				h.LarkBindingTokens = lark.NewBindingTokenService(queries, pool)
-				slog.Info("lark integration enabled")
-
-				// APIClient: wire the real Lark Open Platform HTTP client
-				// (IM v1 send/patch + binding-prompt + bot info). Setting
-				// MULTICA_LARK_SECRET_KEY is the operator's opt-in for
-				// the integration as a whole; we don't expose a separate
-				// "HTTP enabled" knob because the inbound dispatcher
-				// without outbound replies is not a useful production
-				// state, and CI / integration tests that want to avoid
-				// real Lark traffic can point MULTICA_LARK_HTTP_BASE_URL
-				// at a mock server.
+				// Publish lark_installation:created at row-commit time so the
+				// connection badge refreshes on every workspace client, not just
+				// the tab that polls the install status to success.
+				regSvc.SetEventBus(bus)
+				// In-flight bind sessions must be readable by every
+				// replica: the dialog polls the status endpoint every
+				// ~5s and any replica can receive that poll. With the
+				// state in one process's memory, a poll routed
+				// elsewhere 404'd and the dialog reported "session
+				// lost" ~5s after the QR rendered (MUL-7340).
 				//
-				// MULTICA_LARK_HTTP_BASE_URL is an OPTIONAL deployment-wide
-				// override. Normal operation leaves it empty: each call then
-				// resolves its open-platform host from the installation's
-				// region (open.feishu.cn vs open.larksuite.com), so one
-				// deployment serves both clouds. Set it only to force every
-				// installation onto one host — a proxy, a mock for tests, or
-				// a single-cloud staging setup.
-				larkClient := lark.NewHTTPAPIClient(lark.HTTPClientConfig{
-					BaseURL: strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
-					Logger:  slog.Default(),
-				})
-				h.LarkAPIClient = larkClient
-
-				// Channel-backed store: routes the lark package's DB seams
-				// onto the channel_* tables (MUL-3515). Interface-wired
-				// consumers (patcher, typing indicator, dispatcher, hub,
-				// backfills) take it directly; the constructor-based services
-				// wrap *db.Queries internally, so they keep taking queries.
-				cs := lark.NewChannelStore(queries)
-				patcher := lark.NewPatcher(cs, installSvc, larkClient, lark.PatcherConfig{})
-				patcher.Register(bus)
-
-				// Typing indicator: shows a "processing" reaction on the user's
-				// message while the agent is working, then removes it before the
-				// reply is sent. Best-effort; failures are logged only.
-				typingIndicator := lark.NewTypingIndicatorManager(larkClient, installSvc, cs, slog.Default())
-				patcher.SetTypingIndicatorManager(typingIndicator)
-
-				// Inbound pipeline seams: lark_inbound_audit logger and the
-				// shared channel-agnostic chat-session service. They back the
-				// Feishu ResolverSet that the engine.Router runs through,
-				// sharing the same IssueService + TaskService that back HTTP, so
-				// /issue-created issues share counter, dup guard, project
-				// boundary, broadcast, analytics and agent-enqueue with the rest
-				// of the product. Feishu is just another consumer of the shared
-				// engine.ChatSession (channel_type-keyed); the Lark session
-				// titles preserve the pre-cutover wording.
-				auditLogger := lark.NewAuditLogger(queries)
-				feishuSession := engine.NewChatSession(queries, pool, channel.TypeFeishu, engine.SessionTitles{
-					Group:    "Lark group chat",
-					Direct:   "Lark direct message",
-					Fallback: "Lark chat",
-				})
-
-				// OutcomeReplier wires the outbound side: NeedsBinding /
-				// AgentOffline / AgentArchived / issue-created translate to a
-				// Lark-side reply card. Requires the real APIClient and the
-				// binding token service; otherwise it falls back to the noop
-				// replier (outcomes logged, not delivered). We only register
-				// it on the ResolverSet when it can actually deliver, so a
-				// pre-outbound deployment pays no reply-goroutine cost.
-				replier := lark.NewLarkOutcomeReplier(lark.OutcomeReplierConfig{
-					APIClient:   larkClient,
-					BindingSvc:  h.LarkBindingTokens,
-					Credentials: installSvc,
-					Queries:     queries,
-					AppURL:      appURLFromEnv(),
-					Logger:      slog.Default(),
-				})
-				var resolverReplier lark.OutcomeReplier
-				if larkClient.IsConfigured() {
-					resolverReplier = replier
-				}
-
-				// Feishu adapter (MUL-3620): the WSLongConnConnector talks
-				// Lark's long-conn protocol over gorilla/websocket and wraps
-				// every read with a ctx-cancel watchdog so lease loss /
-				// shutdown breaks the blocking ReadMessage in bounded time —
-				// the invariant §4.4 leans on. If the endpoint fetcher fails
-				// to initialize (bad MULTICA_LARK_CALLBACK_BASE_URL or
-				// similar), buildLarkConnector logs and falls back to the
-				// NoopConnector so the lease / supervisor lifecycle still runs
-				// against real DB rows — inbound messages are silently dropped
-				// until the config is fixed, with the boot log labelling the
-				// mode "noop".
-				//
-				// Registering the Factory (connect/send) + ResolverSet
-				// (inbound pipeline seams) is all it takes to add the platform
-				// to the engine — no engine edit.
-				connector, connectorLabel := buildLarkConnector(installSvc, larkClient)
-				lark.RegisterFeishu(channelRegistry, lark.FeishuChannelDeps{
-					Connector:   connector,
-					APIClient:   larkClient,
-					Credentials: installSvc,
-					Logger:      slog.Default(),
-				})
-				mediaResolver := lark.NewFeishuMediaResolver(larkClient, installSvc, store, engine.NewDBMediaIntentLedger(queries), slog.Default())
-				channelRouter.Register(channel.TypeFeishu, lark.NewFeishuResolverSet(
-					cs, feishuSession, auditLogger, resolverReplier, typingIndicator, mediaResolver,
-				))
-				slog.Info("lark inbound pipeline wired", "connector", connectorLabel)
-
-				// One-shot union_id backfill for installations created
-				// before migration 112 added bot_union_id. Runs off the
-				// hot startup path so a slow Lark round-trip cannot block
-				// HTTP listener boot. New installs already write
-				// bot_union_id during the device-flow finalize, so this
-				// is bridge code — it will simply find no rows to update
-				// on a fresh deployment and exit. MUL-2671.
-				go lark.BackfillBotUnionIDs(context.Background(), cs, larkClient, installSvc, slog.Default())
-
-				// Upgrade repair for deployments that ran the whole
-				// integration against Lark international via the deployment-
-				// wide base-URL override before per-installation region
-				// existed: migration 116 backfilled their rows to 'feishu',
-				// so relabel them to 'lark' (their true cloud) before the
-				// operator clears the override. No-op on mainland / fresh
-				// deployments. Off the hot startup path like the union_id
-				// backfill. MUL-3083.
-				go lark.BackfillRegionFromLegacyOverride(context.Background(), cs,
-					strings.TrimSpace(os.Getenv("MULTICA_LARK_HTTP_BASE_URL")),
-					strings.TrimSpace(os.Getenv("MULTICA_LARK_CALLBACK_BASE_URL")),
-					slog.Default())
-
-				// Device-flow registration service: end-to-end install
-				// pipeline that talks to accounts.feishu.cn (RFC 8628)
-				// for the QR-scan handshake and then commits the
-				// resulting Bot credentials + the installer's
-				// lark_user_binding in one DB transaction. The optional
-				// MULTICA_LARK_REGISTRATION_DOMAIN / _LARK_DOMAIN env
-				// vars override the protocol hosts for staging / dev.
-				regCfg := lark.RegistrationConfig{
-					Domain:     strings.TrimSpace(os.Getenv("MULTICA_LARK_REGISTRATION_DOMAIN")),
-					LarkDomain: strings.TrimSpace(os.Getenv("MULTICA_LARK_REGISTRATION_LARK_DOMAIN")),
-				}
-				regClient := lark.NewRegistrationClient(regCfg)
-				regSvc, rerr := lark.NewRegistrationService(
-					lark.RegistrationServiceConfig{Logger: slog.Default()},
-					regClient,
-					larkClient,
-					queries,
-					pool,
-					installSvc,
-					h.LarkBindingTokens,
-				)
-				if rerr != nil {
-					slog.Error("lark: RegistrationService init failed; install disabled", "error", rerr)
+				// Without Redis the service keeps its in-process
+				// store. That is correct for local development and a
+				// single replica, and wrong for a multi-replica deploy
+				// — which is why this says so out loud instead of
+				// failing quietly at the first status poll.
+				if rdb != nil {
+					regSvc.SetInstallSessionStore(lark.NewRedisInstallSessionStore(rdb))
 				} else {
-					// Publish lark_installation:created at row-commit time so the
-					// connection badge refreshes on every workspace client, not just
-					// the tab that polls the install status to success.
-					regSvc.SetEventBus(bus)
-					// In-flight bind sessions must be readable by every
-					// replica: the dialog polls the status endpoint every
-					// ~5s and any replica can receive that poll. With the
-					// state in one process's memory, a poll routed
-					// elsewhere 404'd and the dialog reported "session
-					// lost" ~5s after the QR rendered (MUL-7340).
-					//
-					// Without Redis the service keeps its in-process
-					// store. That is correct for local development and a
-					// single replica, and wrong for a multi-replica deploy
-					// — which is why this says so out loud instead of
-					// failing quietly at the first status poll.
-					if rdb != nil {
-						regSvc.SetInstallSessionStore(lark.NewRedisInstallSessionStore(rdb))
-					} else {
-						slog.Warn("lark device-flow install: no Redis; bind sessions are per-process and will not survive a multi-replica deployment")
-					}
-					h.LarkRegistration = regSvc
-					slog.Info("lark device-flow install enabled")
+					slog.Warn("lark device-flow install: no Redis; bind sessions are per-process and will not survive a multi-replica deployment")
 				}
+				h.LarkRegistration = regSvc
+				slog.Info("lark device-flow install enabled")
 			}
 		}
 	} else {
-		slog.Info("lark integration disabled (MULTICA_LARK_SECRET_KEY not set)")
+		slog.Info("lark integration disabled (no master key available)", "integration", "lark", "legacy_env", "MULTICA_LARK_SECRET_KEY", "error", err)
 	}
 
 	// Slack integration. Multi-tenant B2 model (MUL-3666): Multica hosts ONE
@@ -756,7 +763,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// stage-3 per-installation connection model (MUL-3516).
 	//
 	// Two deployment-level env vars gate the two halves:
-	//   - MULTICA_SLACK_SECRET_KEY decrypts the per-installation bot token
+	//   - the integration key decrypts the per-installation bot token
 	//     (xoxb-) stored on the channel_installation row. It gates the inbound
 	//     ResolverSet + the outbound reply subscriber, so without it there is no
 	//     Slack at all.
@@ -772,139 +779,163 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// installation is a bring-your-own-app (BYO) install carrying its OWN
 	// app-level token, so a per-installation Slack Factory is registered and the
 	// Supervisor drives one Socket Mode connection per installation (like Feishu).
-	if slackKey, err := secretbox.LoadKey("MULTICA_SLACK_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(slackKey)
-		if err != nil {
-			slog.Error("slack: secretbox.New failed; slack integration disabled", "error", err)
-		} else {
-			// Outbound replier (MUL-3666): delivers NeedsBinding prompt /
-			// AgentOffline / AgentArchived / issue-created notices. The binding
-			// token service mints the single-use token embedded in the prompt's
-			// redeem link; the redeem endpoint (registered below, public) binds
-			// the Slack user to their Multica account.
-			slackBindingSvc := slack.NewBindingTokenService(queries, pool)
-			h.SlackBindingTokens = slackBindingSvc
-			slackReplier := slack.NewOutboundReplier(slack.OutboundReplierConfig{
-				Binding: slackBindingSvc,
-				Decrypt: box.Open,
-				// The bind link (/slack/bind) is a web-app page, so it must use the
-				// app URL (MULTICA_APP_URL ?? FRONTEND_ORIGIN), NOT MULTICA_PUBLIC_URL
-				// (the backend/API URL). Mirrors the Lark replier (appURLFromEnv).
-				AppURL:  appURLFromEnv(),
-				Queries: queries,
-				Logger:  slog.Default(),
-			})
-			// Typing indicator (MUL-3874): a 👀 reaction on the user's message
-			// while the agent works, cleared when the run finishes or fails.
-			// Best-effort; failures are logged only. Registered before the
-			// outbound reply subscriber so, on EventChatDone, the reaction clears
-			// ahead of the reply (bus delivery is synchronous, in subscription
-			// order). Subscribing here is also the only path that clears the
-			// reaction on a failed run, which the outbound replier does not handle.
-			slackTyping := slack.NewTypingIndicatorManager(queries, box.Open, slog.Default())
-			slackTyping.Register(bus)
-			// Slack attachments require object storage because each chat
-			// attachment points to an uploaded object. When storage is disabled,
-			// leave the media resolver unset and ingest Slack messages as text.
-			var slackMedia engine.MediaResolver
-			if store != nil {
-				slackMedia = slack.NewMediaResolver(
-					box.Open,
-					store,
-					engine.NewDBMediaIntentLedger(queries),
-					slog.Default(),
-				)
-			}
-			channelRouter.Register(slack.TypeSlack, slack.NewSlackResolverSet(queries, pool, slackReplier, slackTyping, slackMedia))
-			slack.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
-
-			// On-demand history reader behind the unified `multica chat history`
-			// command (MUL-3871): pull the session's Slack conversation when the
-			// agent asks, instead of force-assembling it on every inbound.
-			h.SlackHistory = slack.NewHistory(queries, box.Open, slog.Default())
-
-			// `/issue`, `/new`, and `/clear` are real Slack slash commands delivered
-			// over the same Socket Mode connection. `/issue` enqueues quick-create;
-			// the two session controls reuse the shared route/context and task
-			// services. Every outcome receives a private ephemeral acknowledgement.
-			slackSlash := slack.NewSlashCommandProcessor(slack.SlashCommandConfig{
-				Queries: queries,
-				Tasks:   h.TaskService,
-				Control: slack.NewSlackDMControlStarter(queries, pool, h.TaskService, h),
-				Binding: slackBindingSvc,
-				AppURL:  appURLFromEnv(),
-				Logger:  slog.Default(),
-			})
-
-			// Per-installation inbound: the Supervisor builds + supervises one
-			// Socket Mode connection per active Slack installation, authenticated
-			// with that installation's OWN app-level token (xapp-, pasted at BYO
-			// install) — no deployment-level app token, no single connection.
-			slack.RegisterSlack(channelRegistry, slack.ChannelDeps{Decrypt: box.Open, Logger: slog.Default(), Slash: slackSlash})
-
-			// BYO self-serve install (paste bot token + app-level token). The
-			// InstallService needs only the at-rest encryption key — there is no
-			// hosted OAuth client credential.
-			installSvc, ierr := slack.NewInstallService(queries, pool, box, slog.Default())
-			if ierr != nil {
-				slog.Error("slack: InstallService init failed; install disabled", "error", ierr)
-			} else {
-				h.SlackInstall = installSvc
-			}
-			slog.Info("slack integration enabled (BYO per-installation socket mode)")
+	if slackSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_SLACK_SECRET_KEY", dekQueries); err == nil {
+		box := slackSecret.Box
+		// Outbound replier (MUL-3666): delivers NeedsBinding prompt /
+		// AgentOffline / AgentArchived / issue-created notices. The binding
+		// token service mints the single-use token embedded in the prompt's
+		// redeem link; the redeem endpoint (registered below, public) binds
+		// the Slack user to their Multica account.
+		slackBindingSvc := slack.NewBindingTokenService(queries, pool)
+		h.SlackBindingTokens = slackBindingSvc
+		slackReplier := slack.NewOutboundReplier(slack.OutboundReplierConfig{
+			Binding: slackBindingSvc,
+			Decrypt: box.Open,
+			// The bind link (/slack/bind) is a web-app page, so it must use the
+			// app URL (MULTICA_APP_URL ?? FRONTEND_ORIGIN), NOT MULTICA_PUBLIC_URL
+			// (the backend/API URL). Mirrors the Lark replier (appURLFromEnv).
+			AppURL:  appURLFromEnv(),
+			Queries: queries,
+			Logger:  slog.Default(),
+		})
+		// Typing indicator (MUL-3874): a 👀 reaction on the user's message
+		// while the agent works, cleared when the run finishes or fails.
+		// Best-effort; failures are logged only. Registered before the
+		// outbound reply subscriber so, on EventChatDone, the reaction clears
+		// ahead of the reply (bus delivery is synchronous, in subscription
+		// order). Subscribing here is also the only path that clears the
+		// reaction on a failed run, which the outbound replier does not handle.
+		slackTyping := slack.NewTypingIndicatorManager(queries, box.Open, slog.Default())
+		slackTyping.Register(bus)
+		// Slack attachments require object storage because each chat
+		// attachment points to an uploaded object. When storage is disabled,
+		// leave the media resolver unset and ingest Slack messages as text.
+		var slackMedia engine.MediaResolver
+		if store != nil {
+			slackMedia = slack.NewMediaResolver(
+				box.Open,
+				store,
+				engine.NewDBMediaIntentLedger(queries),
+				slog.Default(),
+			)
 		}
+		channelRouter.Register(slack.TypeSlack, slack.NewSlackResolverSet(queries, pool, slackReplier, slackTyping, slackMedia))
+		slack.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
+
+		// On-demand history reader behind the unified `multica chat history`
+		// command (MUL-3871): pull the session's Slack conversation when the
+		// agent asks, instead of force-assembling it on every inbound.
+		h.SlackHistory = slack.NewHistory(queries, box.Open, slog.Default())
+
+		// `/issue`, `/new`, and `/clear` are real Slack slash commands delivered
+		// over the same Socket Mode connection. `/issue` enqueues quick-create;
+		// the two session controls reuse the shared route/context and task
+		// services. Every outcome receives a private ephemeral acknowledgement.
+		slackSlash := slack.NewSlashCommandProcessor(slack.SlashCommandConfig{
+			Queries: queries,
+			Tasks:   h.TaskService,
+			Control: slack.NewSlackDMControlStarter(queries, pool, h.TaskService, h),
+			Binding: slackBindingSvc,
+			AppURL:  appURLFromEnv(),
+			Logger:  slog.Default(),
+		})
+
+		// Per-installation inbound: the Supervisor builds + supervises one
+		// Socket Mode connection per active Slack installation, authenticated
+		// with that installation's OWN app-level token (xapp-, pasted at BYO
+		// install) — no deployment-level app token, no single connection.
+		slack.RegisterSlack(channelRegistry, slack.ChannelDeps{Decrypt: box.Open, Logger: slog.Default(), Slash: slackSlash})
+
+		// BYO self-serve install (paste bot token + app-level token). The
+		// InstallService needs only the at-rest encryption key — there is no
+		// hosted OAuth client credential.
+		installSvc, ierr := slack.NewInstallService(queries, pool, box, slog.Default())
+		if ierr != nil {
+			slog.Error("slack: InstallService init failed; install disabled", "error", ierr)
+		} else {
+			h.SlackInstall = installSvc
+		}
+		slog.Info("slack integration enabled (BYO per-installation socket mode)")
 	} else {
-		slog.Info("slack integration disabled (MULTICA_SLACK_SECRET_KEY not set)")
+		slog.Info("slack integration disabled (no master key available)", "integration", "slack", "legacy_env", "MULTICA_SLACK_SECRET_KEY", "error", err)
 	}
 
 	// DingTalk uses one outbound Stream connection per BYO installation. The
-	// AppSecret is encrypted at rest and the integration is inert unless its
-	// dedicated deployment key is configured.
-	if dingtalkKey, err := secretbox.LoadKey("MULTICA_DINGTALK_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(dingtalkKey)
-		if err != nil {
-			slog.Error("dingtalk: secretbox.New failed; integration disabled", "error", err)
-		} else {
-			dingtalkClient := dingtalk.NewClient(nil, "")
-			bindingSvc := dingtalk.NewBindingTokenService(queries, pool)
-			h.DingTalkBindingTokens = bindingSvc
-			replier := dingtalk.NewOutboundReplier(dingtalk.OutboundReplierConfig{
-				Binding: bindingSvc,
-				Decrypt: box.Open,
-				Client:  dingtalkClient,
-				AppURL:  appURLFromEnv(),
-				Logger:  slog.Default(),
-			})
-			ack := dingtalk.NewAckNotifier(dingtalkClient, box.Open, slog.Default(), queries)
-			var media engine.MediaResolver
-			if store != nil {
-				media = dingtalk.NewMediaResolver(
-					dingtalkClient,
-					box.Open,
-					store,
-					engine.NewDBMediaIntentLedger(queries),
-					slog.Default(),
-				)
-			}
-			botNames := dingtalk.NewBotNameResolver(dingtalkClient, box.Open)
-			channelRouter.Register(dingtalk.TypeDingTalk, dingtalk.NewDingTalkResolverSet(queries, pool, replier, ack, media, botNames))
-			dingtalk.NewOutbound(queries, box.Open, dingtalkClient, ack, slog.Default()).Register(bus)
-			dingtalk.RegisterDingTalk(channelRegistry, dingtalk.ChannelDeps{
-				Decrypt:  box.Open,
-				Client:   dingtalkClient,
-				BotNames: botNames,
-				Logger:   slog.Default(),
-			})
-			installSvc, installErr := dingtalk.NewInstallService(queries, pool, box, slog.Default())
-			if installErr != nil {
-				slog.Error("dingtalk: InstallService init failed; install disabled", "error", installErr)
-			} else {
-				h.DingTalkInstall = installSvc
-			}
-			slog.Info("dingtalk integration enabled (BYO per-installation stream mode)")
+	// AppSecret is encrypted at rest, and the integration is inert unless a master
+	// key resolves (MULTICA_DINGTALK_SECRET_KEY, else the stored integration DEK).
+	if dingtalkSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_DINGTALK_SECRET_KEY", dekQueries); err == nil {
+		box := dingtalkSecret.Box
+		dingtalkClient := dingtalk.NewClient(nil, "")
+		bindingSvc := dingtalk.NewBindingTokenService(queries, pool)
+		h.DingTalkBindingTokens = bindingSvc
+		replier := dingtalk.NewOutboundReplier(dingtalk.OutboundReplierConfig{
+			Binding: bindingSvc,
+			Decrypt: box.Open,
+			Client:  dingtalkClient,
+			AppURL:  appURLFromEnv(),
+			Logger:  slog.Default(),
+		})
+		ack := dingtalk.NewAckNotifier(dingtalkClient, box.Open, slog.Default(), queries)
+		var media engine.MediaResolver
+		if store != nil {
+			media = dingtalk.NewMediaResolver(
+				dingtalkClient,
+				box.Open,
+				store,
+				engine.NewDBMediaIntentLedger(queries),
+				slog.Default(),
+			)
 		}
+		botNames := dingtalk.NewBotNameResolver(dingtalkClient, box.Open)
+		channelRouter.Register(dingtalk.TypeDingTalk, dingtalk.NewDingTalkResolverSet(queries, pool, replier, ack, media, botNames))
+		dingtalk.NewOutbound(queries, box.Open, dingtalkClient, ack, slog.Default()).Register(bus)
+		dingtalk.RegisterDingTalk(channelRegistry, dingtalk.ChannelDeps{
+			Decrypt:  box.Open,
+			Client:   dingtalkClient,
+			BotNames: botNames,
+			Logger:   slog.Default(),
+		})
+		installSvc, installErr := dingtalk.NewInstallService(queries, pool, box, slog.Default())
+		if installErr != nil {
+			slog.Error("dingtalk: InstallService init failed; install disabled", "error", installErr)
+		} else {
+			h.DingTalkInstall = installSvc
+		}
+		slog.Info("dingtalk integration enabled (BYO per-installation stream mode)")
 	} else {
-		slog.Info("dingtalk integration disabled (MULTICA_DINGTALK_SECRET_KEY not set)")
+		slog.Info("dingtalk integration disabled (no master key available)", "integration", "dingtalk", "legacy_env", "MULTICA_DINGTALK_SECRET_KEY", "error", err)
+	}
+
+	// Tuitui (推推) uses one inbound WebSocket long connection plus an outbound
+	// HTTP robot API per BYO installation, exactly like DingTalk's Stream mode.
+	// The app_secret is encrypted at rest, and the integration is wired only when
+	// a master key resolves — the legacy MULTICA_TUITUI_SECRET_KEY env var when
+	// it is set, else the stored integration DEK. There is no inbound
+	// callback to expose, so nothing here needs to be reachable from the
+	// internet.
+	//
+	// Only the Factory is registered. Tuitui ships no ResolverSet, so the
+	// channelRouter stays unregistered on purpose: a frame arriving without the
+	// session / reply / media resolvers the other channels install would be
+	// dropped rather than half-handled. Installing a bot therefore persists the
+	// credentials and the Supervisor drives its connection, but nothing is
+	// dispatched into chat until that set lands.
+	if tuituiSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_TUITUI_SECRET_KEY", dekQueries); err == nil {
+		box := tuituiSecret.Box
+		tuitui.RegisterTuitui(channelRegistry, tuitui.ChannelDeps{
+			Decrypt: box.Open,
+			Logger:  slog.Default(),
+		})
+		installSvc, installErr := tuitui.NewInstallService(queries, pool, box, slog.Default())
+		if installErr != nil {
+			slog.Error("tuitui: InstallService init failed; install disabled", "error", installErr)
+		} else {
+			h.TuituiInstall = installSvc
+		}
+		h.TuituiBindingTokens = tuitui.NewBindingTokenService(queries, pool)
+		slog.Info("tuitui integration enabled (BYO per-installation websocket mode)")
+	} else {
+		slog.Info("tuitui integration disabled (no master key available)", "integration", "tuitui", "legacy_env", "MULTICA_TUITUI_SECRET_KEY", "error", err)
 	}
 
 	// WeCom smart-bot integration ("智能机器人" / aibot). Per-installation
@@ -913,223 +944,217 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// by the shared ws_lease_token so multi-replica deployments still hold
 	// at most one active socket per bot (WeCom itself only permits one).
 	//
-	// Gated by MULTICA_WECOM_SECRET_KEY. Without it, the whole block is
+	// Gated by a resolved master key (MULTICA_WECOM_SECRET_KEY, else the stored
+	// integration DEK). Without one the whole block is
 	// skipped and the wecom Web-UI endpoints return 503; existing deployments
 	// are unaffected. The smart-bot flow does NOT require any public HTTP
 	// callback, so nothing else needs to be exposed to the internet.
-	if wecomKey, err := secretbox.LoadKey("MULTICA_WECOM_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(wecomKey)
+	if wecomSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_WECOM_SECRET_KEY", dekQueries); err == nil {
+		box := wecomSecret.Box
+		credsResolver, err := wecom.NewSecretboxCredentialsResolver(box)
 		if err != nil {
-			slog.Error("wecom: secretbox.New failed; wecom integration disabled", "error", err)
+			slog.Error("wecom: credentials resolver init failed; wecom integration disabled", "error", err)
 		} else {
-			credsResolver, err := wecom.NewSecretboxCredentialsResolver(box)
-			if err != nil {
-				slog.Error("wecom: credentials resolver init failed; wecom integration disabled", "error", err)
+			wecomStore := wecom.NewStore(queries)
+			h.WecomStore = wecomStore
+			h.WecomCredentials = credsResolver
+
+			// Binding tokens back the per-user "link your Multica account"
+			// prompt sent to first-time WeCom senders. aibot userids are
+			// anonymized T-prefixed ids with no relation to real userids
+			// or emails, so an explicit binding table is the only correct
+			// answer — see wecom/binding.go for the rationale.
+			wecomBinding := wecom.NewBindingTokenService(queries, pool)
+			h.WecomBindingTokens = wecomBinding
+
+			// Senders registry: the wecom OutboundReplier is created here
+			// at boot, but the live wsSender it needs to push
+			// aibot_send_msg only exists inside a running wecomChannel.
+			// wecom.NewSendersRegistry mints a shared map; the
+			// ChannelDeps write side and the Replier read side both
+			// receive it, and each Channel.Connect self-registers on
+			// entry and clears on exit.
+			wecomSenders := opts.WecomSenders
+			if wecomSenders == nil {
+				wecomSenders = wecom.NewSendersRegistry()
+			}
+
+			wecomReplier := wecom.NewOutboundReplier(wecom.OutboundReplierConfig{
+				Binding: wecomBinding,
+				Senders: wecomSenders,
+				AppURL:  appURLFromEnv(),
+				Logger:  slog.Default(),
+			})
+
+			// Wecom shares the engine.ChatSession (channel_type-keyed) so
+			// /issue, dedup, and run-triggering behave identically across
+			// platforms. Session titles use the wecom-flavored wording
+			// (Chinese product voice — wecom deployments are China-only).
+			wecomSession := engine.NewChatSession(queries, pool, wecom.TypeWecom, engine.SessionTitles{
+				Group:    "企业微信群聊",
+				Direct:   "企业微信单聊",
+				Fallback: "企业微信会话",
+			})
+
+			wecom.RegisterWecom(channelRegistry, wecom.ChannelDeps{
+				Credentials: credsResolver,
+				Senders:     wecomSenders,
+				Metrics:     wecomMetricsOrNil(opts.WecomMetrics),
+				Logger:      slog.Default(),
+			})
+			// Inbound media: a callback carries a pre-signed COS url and
+			// a per-url key, so the resolver needs no WeCom credential —
+			// only somewhere durable to put the bytes. Without an object
+			// store there is nothing to point an attachment at, so the
+			// resolver is left nil and attachments stay as their
+			// placeholder text. Same nil-guard as DingTalk above.
+			var wecomMedia engine.MediaResolver
+			if store != nil {
+				wecomMedia = wecom.NewMediaResolver(
+					store,
+					engine.NewDBMediaIntentLedger(queries),
+					wecomSenders,
+					slog.Default(),
+				)
+			}
+			channelRouter.Register(wecom.TypeWecom, wecom.NewResolverSet(
+				wecomStore, wecomSession, wecomReplier, wecomMedia,
+			))
+
+			// EventChatDone subscriber: pushes the agent's chat reply
+			// back over the same aibot WebSocket the inbound loop owns.
+			// Mirrors slack.NewOutbound(...).Register(bus). Without it
+			// the agent's reply lands only in Multica's web UI — the
+			// user in WeCom sees no response.
+			//
+			// WithAttachments adds the second hop: the files the agent
+			// bound to that reply are read back out of object storage and
+			// sent into the chat behind it. Passed only when this
+			// deployment configured storage — with none there is nothing
+			// to read an attachment out of, and the option is what the
+			// delivery path checks for.
+			//
+			// DeclareChannelFileDelivery is the same condition said to the
+			// agent: a run only gets told it can send a file where this
+			// branch actually built the hop that sends it. The two lines
+			// sit together on purpose — a deployment that has the storage
+			// and a deployment whose agents are promised delivery must be
+			// the same deployment, and the only way to keep that true is
+			// for one `if` to decide both.
+			wecomOutboundOpts := []wecom.OutboundOption{}
+			if store != nil {
+				wecomOutboundOpts = append(wecomOutboundOpts, wecom.WithAttachments(store))
+				h.DeclareChannelFileDelivery(string(wecom.TypeWecom))
+			}
+			// The outbound subscriber reports to the same sink the
+			// connection path uses, so an operator reads "replies are
+			// being dropped, and for which reason" off the same dashboard
+			// as "the bot cannot connect".
+			wecomOutboundOpts = append(wecomOutboundOpts,
+				wecom.WithOutboundMetrics(wecomMetricsOrNil(opts.WecomMetrics)))
+			// Cross-replica routing. Built here rather than in main
+			// because the senders registry it guards is created here, and
+			// registered back onto the relay so every node's read loop
+			// reaches it. See wecom/relay_outbound.go.
+			if opts.WecomRelayOutbound != nil {
+				opts.WecomRelayOutbound.SetMetrics(wecomMetricsOrNil(opts.WecomMetrics))
+				wecomOutboundOpts = append(wecomOutboundOpts, wecom.WithRelay(opts.WecomRelayOutbound))
+				slog.Info("wecom integration: cross-replica outbound routing enabled")
+			}
+			wecomOutbound := wecom.NewOutbound(queries, wecomSenders, slog.Default(), wecomOutboundOpts...)
+			wecomOutbound.Register(bus)
+			// The dispatcher has been consuming since before this router
+			// existed; this is where it learns who performs a delivery.
+			// Anything it read in the meantime is waiting in its queue.
+			if opts.WecomRelayOutbound != nil {
+				opts.WecomRelayOutbound.Attach(wecomOutbound)
+			}
+
+			// Ranges the media fetcher may dial despite looking reserved.
+			// Empty by default, which leaves the SSRF guard exactly as
+			// strict as it ships. A deployment behind a fake-IP proxy
+			// needs it: there, every public hostname resolves into the
+			// proxy's pool (198.18.0.0/15 is the common one), so WeCom's
+			// own COS host is indistinguishable from a metadata endpoint
+			// by address alone and every attachment is refused.
+			if raw := strings.TrimSpace(os.Getenv("MULTICA_WECOM_MEDIA_ALLOW_CIDRS")); raw != "" {
+				for _, err := range wecom.SetMediaAllowedPrefixes(strings.Split(raw, ",")) {
+					slog.Error("wecom: ignoring malformed media allow cidr", "error", err)
+				}
+				slog.Warn("wecom: media guard has an operator allow-list; those ranges are reachable by a URL WeCom supplies",
+					"cidrs", raw)
+			}
+
+			// Frame tracing: off unless an operator asks for it. It
+			// records a bounded prefix of message text, so the fact that
+			// it is on has to be visible in the log it is writing into —
+			// otherwise a session gets left switched on and nobody
+			// notices message content accumulating.
+			if wecom.SetTrace(os.Getenv("MULTICA_WECOM_TRACE") == "1") {
+				slog.Warn("wecom: frame tracing ON — records message text; unset MULTICA_WECOM_TRACE when done")
+			}
+
+			slog.Info("wecom integration enabled (smart bot, long connection)")
+			// SINGLE-REPLICA CONSTRAINT: WeCom outbound (agent replies +
+			// inbox pushes) is delivered only by the replica holding each
+			// bot's in-process WebSocket lease. On a multi-replica
+			// deployment, an EventChatDone/EventInboxNew published on another
+			// replica cannot reach the lease holder, so those replies are
+			// dropped. This is stated conditionally rather than gated on a
+			// replica-count signal: the server has no reliable count here,
+			// and REDIS_URL means "Redis configured" (it also gates rate
+			// limiting), not "more than one replica". See wecom/outbound.go
+			// and SELF_HOSTING.md. Remove once outbound routes to the lease
+			// holder.
+			if opts.WecomRelayOutbound != nil {
+				slog.Info("wecom integration: cross-replica outbound routing enabled — agent replies and inbox pushes produced on a replica that does not hold the bot's WebSocket lease are forwarded to the lease holder over the realtime relay. A reply produced while NO replica holds a live connection (every one mid-reconnect) is still lost; see wecom/relay_outbound.go.")
 			} else {
-				wecomStore := wecom.NewStore(queries)
-				h.WecomStore = wecomStore
-				h.WecomCredentials = credsResolver
-
-				// Binding tokens back the per-user "link your Multica account"
-				// prompt sent to first-time WeCom senders. aibot userids are
-				// anonymized T-prefixed ids with no relation to real userids
-				// or emails, so an explicit binding table is the only correct
-				// answer — see wecom/binding.go for the rationale.
-				wecomBinding := wecom.NewBindingTokenService(queries, pool)
-				h.WecomBindingTokens = wecomBinding
-
-				// Senders registry: the wecom OutboundReplier is created here
-				// at boot, but the live wsSender it needs to push
-				// aibot_send_msg only exists inside a running wecomChannel.
-				// wecom.NewSendersRegistry mints a shared map; the
-				// ChannelDeps write side and the Replier read side both
-				// receive it, and each Channel.Connect self-registers on
-				// entry and clears on exit.
-				wecomSenders := opts.WecomSenders
-				if wecomSenders == nil {
-					wecomSenders = wecom.NewSendersRegistry()
-				}
-
-				wecomReplier := wecom.NewOutboundReplier(wecom.OutboundReplierConfig{
-					Binding: wecomBinding,
-					Senders: wecomSenders,
-					AppURL:  appURLFromEnv(),
-					Logger:  slog.Default(),
-				})
-
-				// Wecom shares the engine.ChatSession (channel_type-keyed) so
-				// /issue, dedup, and run-triggering behave identically across
-				// platforms. Session titles use the wecom-flavored wording
-				// (Chinese product voice — wecom deployments are China-only).
-				wecomSession := engine.NewChatSession(queries, pool, wecom.TypeWecom, engine.SessionTitles{
-					Group:    "企业微信群聊",
-					Direct:   "企业微信单聊",
-					Fallback: "企业微信会话",
-				})
-
-				wecom.RegisterWecom(channelRegistry, wecom.ChannelDeps{
-					Credentials: credsResolver,
-					Senders:     wecomSenders,
-					Metrics:     wecomMetricsOrNil(opts.WecomMetrics),
-					Logger:      slog.Default(),
-				})
-				// Inbound media: a callback carries a pre-signed COS url and
-				// a per-url key, so the resolver needs no WeCom credential —
-				// only somewhere durable to put the bytes. Without an object
-				// store there is nothing to point an attachment at, so the
-				// resolver is left nil and attachments stay as their
-				// placeholder text. Same nil-guard as DingTalk above.
-				var wecomMedia engine.MediaResolver
-				if store != nil {
-					wecomMedia = wecom.NewMediaResolver(
-						store,
-						engine.NewDBMediaIntentLedger(queries),
-						wecomSenders,
-						slog.Default(),
-					)
-				}
-				channelRouter.Register(wecom.TypeWecom, wecom.NewResolverSet(
-					wecomStore, wecomSession, wecomReplier, wecomMedia,
-				))
-
-				// EventChatDone subscriber: pushes the agent's chat reply
-				// back over the same aibot WebSocket the inbound loop owns.
-				// Mirrors slack.NewOutbound(...).Register(bus). Without it
-				// the agent's reply lands only in Multica's web UI — the
-				// user in WeCom sees no response.
-				//
-				// WithAttachments adds the second hop: the files the agent
-				// bound to that reply are read back out of object storage and
-				// sent into the chat behind it. Passed only when this
-				// deployment configured storage — with none there is nothing
-				// to read an attachment out of, and the option is what the
-				// delivery path checks for.
-				//
-				// DeclareChannelFileDelivery is the same condition said to the
-				// agent: a run only gets told it can send a file where this
-				// branch actually built the hop that sends it. The two lines
-				// sit together on purpose — a deployment that has the storage
-				// and a deployment whose agents are promised delivery must be
-				// the same deployment, and the only way to keep that true is
-				// for one `if` to decide both.
-				wecomOutboundOpts := []wecom.OutboundOption{}
-				if store != nil {
-					wecomOutboundOpts = append(wecomOutboundOpts, wecom.WithAttachments(store))
-					h.DeclareChannelFileDelivery(string(wecom.TypeWecom))
-				}
-				// The outbound subscriber reports to the same sink the
-				// connection path uses, so an operator reads "replies are
-				// being dropped, and for which reason" off the same dashboard
-				// as "the bot cannot connect".
-				wecomOutboundOpts = append(wecomOutboundOpts,
-					wecom.WithOutboundMetrics(wecomMetricsOrNil(opts.WecomMetrics)))
-				// Cross-replica routing. Built here rather than in main
-				// because the senders registry it guards is created here, and
-				// registered back onto the relay so every node's read loop
-				// reaches it. See wecom/relay_outbound.go.
-				if opts.WecomRelayOutbound != nil {
-					opts.WecomRelayOutbound.SetMetrics(wecomMetricsOrNil(opts.WecomMetrics))
-					wecomOutboundOpts = append(wecomOutboundOpts, wecom.WithRelay(opts.WecomRelayOutbound))
-					slog.Info("wecom integration: cross-replica outbound routing enabled")
-				}
-				wecomOutbound := wecom.NewOutbound(queries, wecomSenders, slog.Default(), wecomOutboundOpts...)
-				wecomOutbound.Register(bus)
-				// The dispatcher has been consuming since before this router
-				// existed; this is where it learns who performs a delivery.
-				// Anything it read in the meantime is waiting in its queue.
-				if opts.WecomRelayOutbound != nil {
-					opts.WecomRelayOutbound.Attach(wecomOutbound)
-				}
-
-				// Ranges the media fetcher may dial despite looking reserved.
-				// Empty by default, which leaves the SSRF guard exactly as
-				// strict as it ships. A deployment behind a fake-IP proxy
-				// needs it: there, every public hostname resolves into the
-				// proxy's pool (198.18.0.0/15 is the common one), so WeCom's
-				// own COS host is indistinguishable from a metadata endpoint
-				// by address alone and every attachment is refused.
-				if raw := strings.TrimSpace(os.Getenv("MULTICA_WECOM_MEDIA_ALLOW_CIDRS")); raw != "" {
-					for _, err := range wecom.SetMediaAllowedPrefixes(strings.Split(raw, ",")) {
-						slog.Error("wecom: ignoring malformed media allow cidr", "error", err)
-					}
-					slog.Warn("wecom: media guard has an operator allow-list; those ranges are reachable by a URL WeCom supplies",
-						"cidrs", raw)
-				}
-
-				// Frame tracing: off unless an operator asks for it. It
-				// records a bounded prefix of message text, so the fact that
-				// it is on has to be visible in the log it is writing into —
-				// otherwise a session gets left switched on and nobody
-				// notices message content accumulating.
-				if wecom.SetTrace(os.Getenv("MULTICA_WECOM_TRACE") == "1") {
-					slog.Warn("wecom: frame tracing ON — records message text; unset MULTICA_WECOM_TRACE when done")
-				}
-
-				slog.Info("wecom integration enabled (smart bot, long connection)")
-				// SINGLE-REPLICA CONSTRAINT: WeCom outbound (agent replies +
-				// inbox pushes) is delivered only by the replica holding each
-				// bot's in-process WebSocket lease. On a multi-replica
-				// deployment, an EventChatDone/EventInboxNew published on another
-				// replica cannot reach the lease holder, so those replies are
-				// dropped. This is stated conditionally rather than gated on a
-				// replica-count signal: the server has no reliable count here,
-				// and REDIS_URL means "Redis configured" (it also gates rate
-				// limiting), not "more than one replica". See wecom/outbound.go
-				// and SELF_HOSTING.md. Remove once outbound routes to the lease
-				// holder.
-				if opts.WecomRelayOutbound != nil {
-					slog.Info("wecom integration: cross-replica outbound routing enabled — agent replies and inbox pushes produced on a replica that does not hold the bot's WebSocket lease are forwarded to the lease holder over the realtime relay. A reply produced while NO replica holds a live connection (every one mid-reconnect) is still lost; see wecom/relay_outbound.go.")
-				} else {
-					slog.Warn("wecom integration: WeCom agent replies and inbox pushes are delivered only by the replica holding each bot's WebSocket lease. If you run more than one backend replica, responses produced on a replica that does not hold the lease will be dropped — run the WeCom-enabled backend as a single replica, or run a sharded/dual realtime relay (REDIS_URL), which enables cross-replica outbound routing.")
-				}
+				slog.Warn("wecom integration: WeCom agent replies and inbox pushes are delivered only by the replica holding each bot's WebSocket lease. If you run more than one backend replica, responses produced on a replica that does not hold the lease will be dropped — run the WeCom-enabled backend as a single replica, or run a sharded/dual realtime relay (REDIS_URL), which enables cross-replica outbound routing.")
 			}
 		}
 	} else {
-		slog.Info("wecom integration disabled (MULTICA_WECOM_SECRET_KEY not set)")
+		slog.Info("wecom integration disabled (no master key available)", "integration", "wecom", "legacy_env", "MULTICA_WECOM_SECRET_KEY", "error", err)
 	}
 
 	// Telegram integration. Same shape as Slack: BYO bot token pasted at
 	// install, one getUpdates long-polling loop per active installation
 	// supervised by the shared engine.Supervisor, resolvers on the generic
 	// channel_* tables, outbound streaming via throttled editMessageText on
-	// the event bus. Gated by MULTICA_TELEGRAM_SECRET_KEY (the at-rest token
-	// encryption key); when unset the handlers return 503 and no Factory is
+	// the event bus. Gated by the at-rest token encryption key
+	// (MULTICA_TELEGRAM_SECRET_KEY, else the stored integration DEK); when none is
+	// available the handlers return 503 and no Factory is
 	// registered.
-	if telegramKey, err := secretbox.LoadKey("MULTICA_TELEGRAM_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(telegramKey)
-		if err != nil {
-			slog.Error("telegram: secretbox.New failed; telegram integration disabled", "error", err)
+	if telegramSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_TELEGRAM_SECRET_KEY", dekQueries); err == nil {
+		box := telegramSecret.Box
+		telegramBindingSvc := telegram.NewBindingTokenService(queries, pool)
+		h.TelegramBindingTokens = telegramBindingSvc
+		telegramReplier := telegram.NewOutboundReplier(telegram.OutboundReplierConfig{
+			Binding: telegramBindingSvc,
+			Decrypt: box.Open,
+			// The bind link (/telegram/bind) is a web-app page: app URL, not
+			// the API URL. Mirrors the Slack replier.
+			AppURL: appURLFromEnv(),
+			Logger: slog.Default(),
+		})
+		telegramTyping := telegram.NewTypingNotifier(box.Open, "", nil, slog.Default())
+		channelRouter.Register(telegram.TypeTelegram, telegram.NewTelegramResolverSet(queries, pool, telegramReplier, telegramTyping))
+		telegramOutbound := telegram.NewOutbound(queries, box.Open, "", nil, slog.Default())
+		telegramOutbound.Register(bus)
+		h.TelegramOutbound = telegramOutbound
+
+		// Per-installation inbound: the Supervisor builds + supervises one
+		// long-polling loop per active Telegram installation.
+		telegram.RegisterTelegram(channelRegistry, telegram.ChannelDeps{Decrypt: box.Open, Logger: slog.Default()})
+
+		installSvc, ierr := telegram.NewInstallService(queries, pool, box, slog.Default())
+		if ierr != nil {
+			slog.Error("telegram: InstallService init failed; install disabled", "error", ierr)
 		} else {
-			telegramBindingSvc := telegram.NewBindingTokenService(queries, pool)
-			h.TelegramBindingTokens = telegramBindingSvc
-			telegramReplier := telegram.NewOutboundReplier(telegram.OutboundReplierConfig{
-				Binding: telegramBindingSvc,
-				Decrypt: box.Open,
-				// The bind link (/telegram/bind) is a web-app page: app URL, not
-				// the API URL. Mirrors the Slack replier.
-				AppURL: appURLFromEnv(),
-				Logger: slog.Default(),
-			})
-			telegramTyping := telegram.NewTypingNotifier(box.Open, "", nil, slog.Default())
-			channelRouter.Register(telegram.TypeTelegram, telegram.NewTelegramResolverSet(queries, pool, telegramReplier, telegramTyping))
-			telegramOutbound := telegram.NewOutbound(queries, box.Open, "", nil, slog.Default())
-			telegramOutbound.Register(bus)
-			h.TelegramOutbound = telegramOutbound
-
-			// Per-installation inbound: the Supervisor builds + supervises one
-			// long-polling loop per active Telegram installation.
-			telegram.RegisterTelegram(channelRegistry, telegram.ChannelDeps{Decrypt: box.Open, Logger: slog.Default()})
-
-			installSvc, ierr := telegram.NewInstallService(queries, pool, box, slog.Default())
-			if ierr != nil {
-				slog.Error("telegram: InstallService init failed; install disabled", "error", ierr)
-			} else {
-				h.TelegramInstall = installSvc
-			}
-			slog.Info("telegram integration enabled (per-installation long polling)")
+			h.TelegramInstall = installSvc
 		}
+		slog.Info("telegram integration enabled (per-installation long polling)")
 	} else {
-		slog.Info("telegram integration disabled (MULTICA_TELEGRAM_SECRET_KEY not set)")
+		slog.Info("telegram integration disabled (no master key available)", "integration", "telegram", "legacy_env", "MULTICA_TELEGRAM_SECRET_KEY", "error", err)
 	}
 
 	// Composio integration (MUL-3720). Gated by COMPOSIO_API_KEY plus the
@@ -1191,45 +1216,41 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	// VCS at-rest encryption: the box encrypts per-workspace access tokens and
 	// webhook secrets for token-based providers (Forgejo / Gitea / GitLab).
-	// Without it, connect/webhook handlers return 503 (so a misconfigured
+	// Without one, connect/webhook handlers return 503 (so a misconfigured
 	// self-host never stores plaintext secrets).
-	if vcsKey, err := secretbox.LoadKey("MULTICA_VCS_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(vcsKey)
-		if err != nil {
-			slog.Error("vcs: secretbox.New failed; vcs integration disabled", "error", err)
-		} else {
-			h.VCSSecretBox = box
-			slog.Info("vcs integration enabled")
-		}
+	if vcsSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_VCS_SECRET_KEY", dekQueries); err == nil {
+		box := vcsSecret.Box
+		h.VCSSecretBox = box
+		slog.Info("vcs integration enabled")
 	} else {
-		slog.Info("vcs integration disabled (MULTICA_VCS_SECRET_KEY not set)")
+		slog.Info("vcs integration disabled (no master key available)", "integration", "vcs", "legacy_env", "MULTICA_VCS_SECRET_KEY", "error", err)
 	}
 
-	// Plugin secrets use a dedicated deployment key. Keeping this separate from
-	// VCS and channel secrets gives operators an isolated rotation and blast
-	// radius; without it, saving a `secret` config field fails closed rather
-	// than storing plaintext.
-	if pluginKey, err := secretbox.LoadKey("MULTICA_PLUGIN_SECRET_KEY"); err == nil {
-		box, err := secretbox.New(pluginKey)
-		if err != nil {
-			slog.Error("plugins: secretbox.New failed; Plugin secrets disabled", "error", err)
-		} else if h.PluginService != nil {
-			h.PluginService.Secrets = box
-			// The same deployment key, kept raw as well. Sealing and signing
+	// Plugin secrets keep a dedicated deployment key when one is set. That
+	// isolation gives operators a separate rotation and blast radius; without
+	// MULTICA_PLUGIN_SECRET_KEY they instead share the stored integration DEK
+	// with the chat channels, and saving a `secret` config field still fails
+	// closed rather than storing plaintext.
+	if pluginSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_PLUGIN_SECRET_KEY", dekQueries); err == nil {
+		if h.PluginService != nil {
+			h.PluginService.Secrets = pluginSecret.Box
+			// The same key, kept raw as well. Sealing and signing
 			// need different things from it: a secret config value is sealed
 			// and later opened, while a hook signature must be REPRODUCED on
 			// demand, which a box cannot do. Each installation's signing secret
 			// is derived from this rather than stored, so no row holds a usable
 			// one.
-			h.PluginService.DeploymentKey = pluginKey
-			h.PluginSurfaceTokens, err = handler.NewPluginSurfaceTokenBox(pluginKey)
-			if err != nil {
-				slog.Error("plugins: surface token key derivation failed; surfaces disabled", "error", err)
+			h.PluginService.DeploymentKey = pluginSecret.Key
+			surfaceTokens, surfaceErr := handler.NewPluginSurfaceTokenBox(pluginSecret.Key)
+			if surfaceErr != nil {
+				slog.Error("plugins: surface token key derivation failed; surfaces disabled", "error", surfaceErr)
+			} else {
+				h.PluginSurfaceTokens = surfaceTokens
 			}
 			slog.Info("Plugin secret encryption enabled")
 		}
 	} else {
-		slog.Info("Plugin secrets disabled (MULTICA_PLUGIN_SECRET_KEY not set)")
+		slog.Info("Plugin secrets disabled (no master key available)", "error", err)
 	}
 
 	// Hook engine. Event-triggered hooks are dispatched off the bus onto a
@@ -1758,6 +1779,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/dingtalk/install/byo", h.RegisterDingTalkBYO)
 				})
 
+				// Tuitui integration. Same member-visible / agent-owner-or-admin
+				// split as DingTalk, and the same five routes: the inventory the
+				// Settings panel renders, the bots this workspace has connected,
+				// and one group's route retirement.
+				r.Group(func(r chi.Router) {
+					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
+					r.Get("/tuitui/installations", h.ListTuituiInstallations)
+					r.Get("/tuitui/groups", h.ListTuituiGroups)
+					r.Delete("/tuitui/installations/{installationId}/groups/{conversationId}", h.ForgetTuituiGroup)
+					r.Delete("/tuitui/installations/{installationId}", h.RevokeTuituiInstallation)
+					r.Post("/tuitui/install/byo", h.RegisterTuituiBYO)
+				})
+
 				// Telegram integration. Same admin/member split as Slack:
 				// listing is member-visible; install + revoke are admin-only.
 				r.Group(func(r chi.Router) {
@@ -1788,6 +1822,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// DingTalk binding redemption is user-scoped for the same reason as
 		// Slack: the token is redeemed before workspace context is selected.
 		r.Post("/api/dingtalk/binding/redeem", h.RedeemDingTalkBindingToken)
+		// Tuitui binding redemption is user-scoped for the same reason as
+		// DingTalk: the redeemer hits this with no workspace context, the session
+		// supplies their Multica identity, and the token only carries which
+		// Tuitui account asked to be linked.
+		r.Post("/api/tuitui/binding/redeem", h.RedeemTuituiBindingToken)
 		// WeCom smart-bot binding-token redemption. Same rationale as
 		// Lark/Slack: the session is the source of truth for the redeemer's
 		// Multica identity; the token only carries the WeCom userid to bind.
@@ -2124,6 +2163,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/cancel-tasks", h.CancelAgentTasks)
 					r.Get("/tasks", h.ListAgentTasks)
 					r.Get("/dingtalk/groups", h.ListDingTalkGroupsForAgent)
+					r.Get("/tuitui/groups", h.ListTuituiGroupsForAgent)
 					r.Get("/skills", h.ListAgentSkills)
 					r.Put("/skills", h.SetAgentSkills)
 					r.Post("/skills/add", h.AddAgentSkills)

@@ -114,6 +114,7 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "lark",
   "slack",
   "telegram",
+  "tuitui",
   "wecom",
 
   // Backend ops / observability

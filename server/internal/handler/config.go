@@ -101,6 +101,21 @@ type AppConfig struct {
 	// answers 404.
 	LocalDirBrowserSupported bool `json:"local_dir_browser_supported"`
 
+	// TuituiSupported tells clients that this build registers the Tuitui (推推)
+	// chat-channel surface: GET/DELETE /api/workspaces/{id}/tuitui/*,
+	// POST /api/workspaces/{id}/tuitui/install/byo, and
+	// POST /api/tuitui/binding/redeem.
+	//
+	// Load-bearing for CLIENTS, not for this server, and a property of the build
+	// rather than of the deployment — whether a bot can actually be connected is
+	// the `configured` flag the installations endpoint answers, so the two
+	// booleans never carry the same fact twice. Releases before this one never
+	// served those routes and say nothing, so absent must be read as "no Tuitui
+	// UI": a client that assumed otherwise would offer to connect a robot against
+	// an API that answers 404, and a user would paste a real app_secret into a
+	// form with nowhere to store it.
+	TuituiSupported bool `json:"tuitui_supported"`
+
 	// ServerVersion is the running API build version, so self-hosted
 	// operators can confirm what's deployed and include it in bug reports.
 	// Only emitted on self-hosted deployments — omitted on the managed cloud,
@@ -121,6 +136,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		AgentConversationStartersSupported: true,
 		CommentDeleteKeepRepliesSupported:  true,
 		LocalDirBrowserSupported:           true,
+		TuituiSupported:                    true,
 		AllowSignup:                        os.Getenv("ALLOW_SIGNUP") != "false",
 		GoogleClientID:                     os.Getenv("GOOGLE_CLIENT_ID"),
 		WorkspaceCreationDisabled:          os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",

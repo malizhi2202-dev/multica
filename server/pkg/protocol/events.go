@@ -202,6 +202,13 @@ const (
 	EventDingTalkInstallationRevoked   = "dingtalk_installation:revoked"
 	EventDingTalkAccountBindingUpdated = "dingtalk_installation:binding_updated"
 
+	// Tuitui installation lifecycle — the same create / revoke / binding trio as
+	// DingTalk's, under the tuitui_installation prefix so a client subscribes to
+	// this channel's events without filtering every payload.
+	EventTuituiInstallationCreated   = "tuitui_installation:created"
+	EventTuituiInstallationRevoked   = "tuitui_installation:revoked"
+	EventTuituiAccountBindingUpdated = "tuitui_installation:binding_updated"
+
 	// WeCom smart-bot installation lifecycle. Same semantics as Lark /
 	// Slack: `created` covers both first install and re-install via
 	// UpsertChannelInstallation (the UNIQUE on (workspace_id, agent_id,

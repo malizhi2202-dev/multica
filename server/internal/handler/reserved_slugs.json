@@ -104,6 +104,7 @@
         "lark",
         "slack",
         "telegram",
+        "tuitui",
         "wecom"
       ]
     },

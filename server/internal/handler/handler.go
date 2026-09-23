@@ -32,6 +32,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/integrations/telegram"
+	"github.com/multica-ai/multica/server/internal/integrations/tuitui"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -78,7 +79,7 @@ type Config struct {
 	DisableWorkspaceCreation bool
 	// VCSIntegrationEnabled gates the self-hosted Git provider integration
 	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
-	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is
+	// any master key resolves. It is the product boundary: the feature is
 	// intended for self-hosted Multica only (where Multica and the Git instance
 	// can share a network), and is left off on the managed cloud — connect,
 	// rotate, and webhook handlers reject when it is false, and /api/config
@@ -270,8 +271,9 @@ type Handler struct {
 	LarkRegistration *lark.RegistrationService
 	// LarkAPIClient is the live transport that backs SendInteractiveCard,
 	// PatchInteractiveCard, SendBindingPromptCard, GetBotInfo. The
-	// router wires the real Lark HTTP client whenever
-	// MULTICA_LARK_SECRET_KEY is set; tests that need a no-op
+	// router wires the real Lark HTTP client whenever a master key
+	// resolves (legacy MULTICA_LARK_SECRET_KEY or the stored integration DEK);
+	// tests that need a no-op
 	// behaviour can swap in `lark.NewStubAPIClient(...)` directly. The
 	// UI consults IsConfigured() to decide whether to surface install
 	// entry points.
@@ -287,7 +289,7 @@ type Handler struct {
 	// drives any channel type, not just Feishu. It remains nil when lease
 	// configuration is unsafe or a selected Redis backend fails its startup
 	// readiness check; each platform registers its Factory only when configured
-	// (Feishu when MULTICA_LARK_SECRET_KEY is set). The router does NOT
+	// (Feishu when a master key resolves). The router does NOT
 	// call Run; the process owner (main.go) starts it under a long-running
 	// context and joins via WaitWithTimeout (bounded, fenced by
 	// ShutdownTimeout) during graceful shutdown so the lease renewer yields
@@ -307,17 +309,29 @@ type Handler struct {
 	ChannelMediaReconciler *service.ChannelMediaReconciler
 	// SlackInstall owns the bring-your-own-app Slack install lifecycle (register
 	// pasted tokens / list / revoke) and the at-rest encryption of each app's bot
-	// + app tokens (MUL-3666). Nil unless MULTICA_SLACK_SECRET_KEY is set.
+	// + app tokens (MUL-3666). Nil when no master key resolves — the legacy
+	// MULTICA_SLACK_SECRET_KEY or the stored integration DEK (secretbox).
 	SlackInstall *slack.InstallService
 	// SlackBindingTokens mints/redeems the user-binding tokens behind the
 	// "link your Slack account" prompt (MUL-3666). Nil unless Slack is
-	// configured (MULTICA_SLACK_SECRET_KEY set).
+	// configured at all (see SlackInstall).
 	SlackBindingTokens *slack.BindingTokenService
 	// DingTalkInstall owns the bring-your-own-app DingTalk lifecycle. It is nil
-	// unless MULTICA_DINGTALK_SECRET_KEY is configured.
+	// when no master key resolves — the legacy MULTICA_DINGTALK_SECRET_KEY or
+	// the stored integration DEK (secretbox.ResolveIntegrationKey).
 	DingTalkInstall *dingtalk.InstallService
 	// DingTalkBindingTokens mints and redeems the single-use account-link tokens.
 	DingTalkBindingTokens *dingtalk.BindingTokenService
+	// TuituiInstall owns the bring-your-own-app Tuitui lifecycle (register pasted
+	// app credentials / list / revoke / forget one group route) and the at-rest
+	// encryption of each app's secret. It is nil only when no master key could be
+	// resolved at all (see server/internal/util/secretbox/MIGRATION.md), so a
+	// Tuitui handler's not-configured branch is about this deployment's storage,
+	// not about an operator who never set an env var.
+	TuituiInstall *tuitui.InstallService
+	// TuituiBindingTokens mints and redeems the single-use account-link tokens
+	// behind the "link your Tuitui account" prompt. Nil disables redeem (403).
+	TuituiBindingTokens *tuitui.BindingTokenService
 	// SlackHistory backs the agent-facing `multica chat history` command: it
 	// reads a chat session's bound Slack conversation on demand (MUL-3871). Nil
 	// unless Slack is configured; GetChatChannelHistory then reports "no channel
@@ -345,7 +359,8 @@ type Handler struct {
 
 	// TelegramInstall owns the Telegram bot install lifecycle (register a
 	// pasted BotFather token / list / revoke) and the at-rest encryption of
-	// each bot's token. Nil unless MULTICA_TELEGRAM_SECRET_KEY is set.
+	// each bot's token. Nil when no master key resolves (legacy
+	// MULTICA_TELEGRAM_SECRET_KEY or the stored integration DEK).
 	TelegramInstall *telegram.InstallService
 	// TelegramBindingTokens mints/redeems the user-binding tokens behind the
 	// "link your Telegram account" prompt. Nil unless Telegram is configured.
@@ -385,8 +400,9 @@ type Handler struct {
 	// back silently.
 	LLM *llm.Client
 	// VCSSecretBox encrypts/decrypts per-workspace Git provider access tokens and
-	// webhook secrets at rest (Forgejo / Gitea / GitLab). Nil when
-	// MULTICA_VCS_SECRET_KEY is unset; connect returns 403 and webhook returns 404
+	// webhook secrets at rest (Forgejo / Gitea / GitLab). Nil when no master key
+	// resolves (legacy MULTICA_VCS_SECRET_KEY or the stored integration DEK);
+	// connect then returns 403 and webhook returns 404
 	// in that case so a misconfigured self-host deployment surfaces a clear
 	// error rather than silently storing plaintext. Wired in
 	// cmd/server/router.go after New.
