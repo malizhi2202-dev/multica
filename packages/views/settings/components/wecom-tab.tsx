@@ -93,12 +93,7 @@ export function WecomTab() {
           <CardContent className="space-y-2">
             <p className="text-body font-medium">{t(($) => $.wecom.not_enabled_title)}</p>
             <p className="text-caption text-muted-foreground">
-              {t(($) => $.wecom.not_enabled_description_prefix)}{" "}
-              <code className="rounded-xs bg-muted px-1 py-0.5 text-micro">
-                MULTICA_WECOM_SECRET_KEY
-              </code>{" "}
-              {t(($) => $.wecom.not_enabled_description_suffix)}{" "}
-              {t(($) => $.wecom.not_enabled_self_host_hint)}
+              {t(($) => $.wecom.not_enabled_description)}
             </p>
           </CardContent>
         </Card>

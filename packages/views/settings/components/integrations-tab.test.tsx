@@ -67,6 +67,9 @@ vi.mock("./wecom-tab", () => ({ WecomTab: () => <div>WeCom detail</div> }));
 vi.mock("./telegram-tab", () => ({
   TelegramTab: () => <div>Telegram detail</div>,
 }));
+vi.mock("./tuitui-tab", () => ({
+  TuituiTab: () => <div>Tuitui detail</div>,
+}));
 
 import { IntegrationsTab } from "./integrations-tab";
 
@@ -82,6 +85,9 @@ beforeEach(() => {
   configStore
     .getState()
     .setAuthConfig({ allowSignup: true, vcsIntegrationAvailable: false });
+  // Fail-closed default: a server that does not declare the channel must not
+  // get a row whose only outcomes are a 404 and a broken Connect CTA.
+  configStore.getState().setTuituiSupported(false);
 });
 
 describe("Integration directory", () => {
@@ -101,6 +107,37 @@ describe("Integration directory", () => {
       "/acme/settings?tab=integrations&integration=github",
     );
   });
+  it("hides the Tuitui row while the server does not declare the channel", () => {
+    state.search = "tab=integrations&integration=tuitui";
+    renderWithI18n(<IntegrationsTab />);
+    expect(screen.queryByTestId("integration-channel-icon-tuitui")).toBeNull();
+    expect(screen.queryByRole("link", { name: /Tuitui/ })).toBeNull();
+    // The bookmarked detail must not bypass the capability gate either.
+    expect(screen.queryByText("Tuitui detail")).not.toBeInTheDocument();
+    const tuituiCalls = state.calls.filter((call) =>
+      call.queryKey.includes("tuitui"),
+    );
+    expect(tuituiCalls.length).toBeGreaterThan(0);
+    expect(tuituiCalls.every((call) => call.enabled === false)).toBe(true);
+  });
+
+  it("offers the Tuitui row once the server declares the channel supported", () => {
+    configStore.getState().setTuituiSupported(true);
+    renderWithI18n(<IntegrationsTab />);
+    fireEvent.click(screen.getByRole("link", { name: /Tuitui Connected/ }));
+    expect(state.push).toHaveBeenCalledWith(
+      "/acme/settings?tab=integrations&integration=tuitui",
+    );
+  });
+
+  it("mounts the Tuitui panel only for its bookmark when supported", () => {
+    configStore.getState().setTuituiSupported(true);
+    state.search = "tab=integrations&integration=tuitui";
+    renderWithI18n(<IntegrationsTab />);
+    expect(screen.getByText("Tuitui detail")).toBeInTheDocument();
+    expect(screen.queryByText("Slack detail")).not.toBeInTheDocument();
+  });
+
   it("opens only the selected provider and offers a directory link", () => {
     state.search = "tab=integrations&integration=slack";
     renderWithI18n(<IntegrationsTab />);

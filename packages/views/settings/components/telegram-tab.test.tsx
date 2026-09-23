@@ -248,13 +248,13 @@ describe("TelegramTab", () => {
     telegramQueryLoadingRef.current = true;
     renderUI(<TelegramTab />);
     expect(screen.getByText("Loading…")).toBeTruthy();
-    expect(screen.queryByText(/Telegram integration not enabled/i)).toBeNull();
+    expect(screen.queryByText(/Telegram integration is currently unavailable/i)).toBeNull();
   });
 
   it("surfaces the not-enabled notice when the deployment has no Telegram key", () => {
     installationsRef.current = { installations: [], configured: false, install_supported: false };
     renderUI(<TelegramTab />);
-    expect(screen.getByText(/Telegram integration not enabled/i)).toBeTruthy();
+    expect(screen.getByText(/Telegram integration is currently unavailable/i)).toBeTruthy();
   });
 
   it("shows the empty state when configured but nothing is connected", () => {
@@ -326,6 +326,6 @@ describe("TelegramTab", () => {
     telegramQueryErrorRef.current = true;
     renderUI(<TelegramTab />);
     expect(screen.getByText(/Failed to load Telegram installations/i)).toBeTruthy();
-    expect(screen.queryByText(/Telegram integration not enabled/i)).toBeNull();
+    expect(screen.queryByText(/Telegram integration is currently unavailable/i)).toBeNull();
   });
 });

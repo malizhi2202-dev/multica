@@ -189,6 +189,12 @@ import type {
   ListDingTalkGroupsParams,
   RegisterDingTalkBYORequest,
   RedeemDingTalkBindingTokenResponse,
+  TuituiInstallation,
+  ListTuituiInstallationsResponse,
+  ListTuituiGroupsResponse,
+  ListTuituiGroupsParams,
+  RegisterTuituiBYORequest,
+  RedeemTuituiBindingTokenResponse,
   WecomInstallation,
   ListWecomInstallationsResponse,
   RegisterWecomBYORequest,
@@ -361,6 +367,14 @@ import {
   EMPTY_LIST_DINGTALK_INSTALLATIONS_RESPONSE,
   EMPTY_LIST_DINGTALK_GROUPS_RESPONSE,
   EMPTY_REDEEM_DINGTALK_BINDING_TOKEN_RESPONSE,
+  TuituiInstallationSchema,
+  ListTuituiInstallationsResponseSchema,
+  ListTuituiGroupsResponseSchema,
+  RedeemTuituiBindingTokenResponseSchema,
+  EMPTY_TUITUI_INSTALLATION,
+  EMPTY_LIST_TUITUI_INSTALLATIONS_RESPONSE,
+  EMPTY_LIST_TUITUI_GROUPS_RESPONSE,
+  EMPTY_REDEEM_TUITUI_BINDING_TOKEN_RESPONSE,
   WecomInstallationSchema,
   ListWecomInstallationsResponseSchema,
   RedeemWecomBindingTokenResponseSchema,
@@ -680,6 +694,16 @@ function workspaceHeader(
 }
 
 function dingTalkGroupSearch(params: ListDingTalkGroupsParams): string {
+  const search = new URLSearchParams();
+  if (params.activity) search.set("activity", params.activity);
+  if (params.installationId) search.set("installation_id", params.installationId);
+  if (params.offset !== undefined) search.set("offset", String(params.offset));
+  if (params.limit !== undefined) search.set("limit", String(params.limit));
+  const encoded = search.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+function tuituiGroupSearch(params: ListTuituiGroupsParams): string {
   const search = new URLSearchParams();
   if (params.activity) search.set("activity", params.activity);
   if (params.installationId) search.set("installation_id", params.installationId);
@@ -4887,6 +4911,132 @@ export class ApiClient {
       { endpoint: "POST /api/dingtalk/binding/redeem" },
     );
   }
+
+  // Tuitui (推推) integration — the fifth isomorphic IM channel, shaped after
+  // DingTalk: per-agent BYO app installs, group discovery via validated @bot
+  // callbacks, and a user-level binding redeem. The inbound WebSocket loop
+  // runs entirely server-side; these methods drive the Settings panel, the
+  // agent-side connect dialog, and the bind page.
+  async listTuituiInstallations(
+    workspaceId: string,
+  ): Promise<ListTuituiInstallationsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/tuitui/installations`);
+    return parseWithFallback(
+      raw,
+      ListTuituiInstallationsResponseSchema,
+      EMPTY_LIST_TUITUI_INSTALLATIONS_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/tuitui/installations" },
+    );
+  }
+
+  async listTuituiGroups(
+    workspaceId: string,
+    params: ListTuituiGroupsParams = {},
+  ): Promise<ListTuituiGroupsResponse> {
+    let raw: unknown;
+    try {
+      const search = tuituiGroupSearch(params);
+      raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/tuitui/groups${search}`);
+    } catch (error) {
+      // Installed clients can be newer than the server they reconnect to. A
+      // backend predating group discovery 404s this additive endpoint, and
+      // older member-visible inventories answer 403 to non-admins; both mean
+      // this client cannot use the workspace inventory, while real failures
+      // stay visible.
+      if (
+        error instanceof ApiError &&
+        (error.status === 404 || error.status === 403)
+      ) {
+        return EMPTY_LIST_TUITUI_GROUPS_RESPONSE;
+      }
+      throw error;
+    }
+    return parseWithFallback(
+      raw,
+      ListTuituiGroupsResponseSchema,
+      EMPTY_LIST_TUITUI_GROUPS_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/tuitui/groups" },
+    );
+  }
+
+  async listAgentTuituiGroups(
+    agentId: string,
+    params: ListTuituiGroupsParams = {},
+  ): Promise<ListTuituiGroupsResponse> {
+    let raw: unknown;
+    try {
+      const search = tuituiGroupSearch(params);
+      raw = await this.fetch<unknown>(`/api/agents/${agentId}/tuitui/groups${search}`);
+    } catch (error) {
+      // Keep installed clients compatible with servers that predate agent-
+      // scoped group discovery. Authorization failures must remain visible.
+      if (error instanceof ApiError && error.status === 404) {
+        return EMPTY_LIST_TUITUI_GROUPS_RESPONSE;
+      }
+      throw error;
+    }
+    return parseWithFallback(
+      raw,
+      ListTuituiGroupsResponseSchema,
+      EMPTY_LIST_TUITUI_GROUPS_RESPONSE,
+      { endpoint: "GET /api/agents/:id/tuitui/groups" },
+    );
+  }
+
+  async forgetTuituiGroup(
+    workspaceId: string,
+    installationId: string,
+    conversationId: string,
+  ): Promise<void> {
+    await this.fetch(
+      `/api/workspaces/${workspaceId}/tuitui/installations/${installationId}/groups/${encodeURIComponent(conversationId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  // registerTuituiBYO performs a bring-your-own-app install: the agent owner
+  // or a workspace owner/admin pastes the app_id + app_secret of the Tuitui
+  // robot application they created, and the backend validates + persists it,
+  // returning the new installation.
+  async registerTuituiBYO(
+    workspaceId: string,
+    agentId: string,
+    body: RegisterTuituiBYORequest,
+  ): Promise<TuituiInstallation> {
+    const search = new URLSearchParams({ agent_id: agentId });
+    const raw = await this.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/tuitui/install/byo?${search.toString()}`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    );
+    return parseWithFallback(raw, TuituiInstallationSchema, EMPTY_TUITUI_INSTALLATION, {
+      endpoint: "POST /api/workspaces/:id/tuitui/install/byo",
+    });
+  }
+
+  async deleteTuituiInstallation(workspaceId: string, installationId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/tuitui/installations/${installationId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async redeemTuituiBindingToken(
+    token: string,
+  ): Promise<RedeemTuituiBindingTokenResponse> {
+    const raw = await this.fetch<unknown>(`/api/tuitui/binding/redeem`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+    return parseWithFallback(
+      raw,
+      RedeemTuituiBindingTokenResponseSchema,
+      EMPTY_REDEEM_TUITUI_BINDING_TOKEN_RESPONSE,
+      { endpoint: "POST /api/tuitui/binding/redeem" },
+    );
+  }
+
   // WeCom smart-bot ("智能机器人" / aibot) integration. The bot dials a
   // WebSocket long connection to wss://openws.work.weixin.qq.com and stays
   // authenticated with (bot_id, secret); no public callback URL is required.

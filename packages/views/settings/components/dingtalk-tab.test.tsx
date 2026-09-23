@@ -321,7 +321,7 @@ describe("DingTalkTab", () => {
   it("surfaces the not-enabled notice when the deployment has no DingTalk key", () => {
     installationsRef.current = { installations: [], configured: false, install_supported: false };
     renderUI(<DingTalkTab />);
-    expect(screen.getByText(/DingTalk integration not enabled/i)).toBeTruthy();
+    expect(screen.getByText(/DingTalk integration is currently unavailable/i)).toBeTruthy();
   });
 
   it("shows the empty state when configured but nothing is connected", () => {

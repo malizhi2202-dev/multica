@@ -106,6 +106,11 @@ export function AuthInitializer({
           .setCommentDeleteKeepRepliesSupported(
             cfg.comment_delete_keep_replies_supported === true,
           );
+        // Servers predating the Tuitui channel omit the flag; absent must fail
+        // closed so no channel UI issues requests that can only 404.
+        configStore
+          .getState()
+          .setTuituiSupported(cfg.tuitui_supported === true);
         if (cfg.posthog_key) {
           initAnalytics({
             key: cfg.posthog_key,

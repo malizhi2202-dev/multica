@@ -21,14 +21,17 @@ export interface SlackInstallation {
 
 export interface ListSlackInstallationsResponse {
   installations: SlackInstallation[];
-  /** Whether the deployment has the at-rest secret key configured. When false
-   * the connect entry points are hidden and the panel renders an "ask the
-   * operator to enable Slack" state. */
+  /** Whether the Slack integration is currently usable on this deployment.
+   * Channel credentials are entered in the UI and sealed at rest with the
+   * deployment's data key (an environment override is optional), so false
+   * means "this integration is currently unavailable" — not "an operator has
+   * no env var to set". When false the connect entry points are hidden and
+   * the panel renders the "currently unavailable" state. */
   configured: boolean;
-  /** Whether the install path is available (true whenever Slack is configured,
-   * i.e. the at-rest key is set — a bring-your-own-app install needs no hosted
-   * OAuth credentials). Kept as a separate flag for forward/backward compat;
-   * optional so an older desktop build that predates it treats it as off. */
+  /** Whether the install path is available (true whenever Slack is configured
+   * — a bring-your-own-app install needs no hosted OAuth credentials). Kept as
+   * a separate flag for forward/backward compat; optional so an older desktop
+   * build that predates it treats it as off. */
   install_supported?: boolean;
 }
 

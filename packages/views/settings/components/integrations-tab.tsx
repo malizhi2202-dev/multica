@@ -16,6 +16,7 @@ import { slackInstallationsOptions } from "@multica/core/slack";
 import { dingtalkInstallationsOptions } from "@multica/core/dingtalk";
 import { wecomInstallationsOptions } from "@multica/core/wecom";
 import { telegramInstallationsOptions } from "@multica/core/telegram";
+import { tuituiInstallationsOptions } from "@multica/core/tuitui";
 import { vcsConnectionsOptions } from "@multica/core/vcs";
 import { useConfigStore, useFeatureEnabled } from "@multica/core/config";
 import { COMPOSIO_MCP_APPS_FLAG } from "@multica/core/feature-flags";
@@ -29,6 +30,7 @@ import { DingTalkTab } from "./dingtalk-tab";
 import { VCSTab } from "./vcs-tab";
 import { WecomTab } from "./wecom-tab";
 import { TelegramTab } from "./telegram-tab";
+import { TuituiTab } from "./tuitui-tab";
 import { GitHubTab } from "./github-tab";
 import { GitHubMark } from "./github-mark";
 import { SettingsCard, SettingsSection, SettingsTab } from "./settings-layout";
@@ -66,6 +68,9 @@ export function IntegrationsTab() {
   const canView = !!wsId && !!member;
   const composioEnabled = useFeatureEnabled(COMPOSIO_MCP_APPS_FLAG, false);
   const vcsAvailable = useConfigStore((s) => s.vcsIntegrationAvailable);
+  // Fail closed: a server that predates the Tuitui channel must not get a
+  // channel row whose only outcomes are a 404 and a broken Connect CTA.
+  const tuituiSupported = useConfigStore((s) => s.tuituiSupported);
   const toolkits = useQuery({
     ...composioToolkitsOptions(),
     enabled: composioEnabled,
@@ -105,6 +110,11 @@ export function IntegrationsTab() {
   const telegram = useQuery({
     ...telegramInstallationsOptions(wsId),
     enabled: canView,
+    select: hasActiveInstallation,
+  });
+  const tuitui = useQuery({
+    ...tuituiInstallationsOptions(wsId),
+    enabled: canView && tuituiSupported,
     select: hasActiveInstallation,
   });
   const vcs = useQuery({
@@ -193,6 +203,18 @@ export function IntegrationsTab() {
           content: <TelegramTab />,
           state: telegram,
         },
+        ...(tuituiSupported
+          ? [
+              {
+                id: "tuitui",
+                label: t(($) => $.tuitui.section_title),
+                description: t(($) => $.tuitui.page_description),
+                icon: <IntegrationChannelIcon channel="tuitui" />,
+                content: <TuituiTab />,
+                state: tuitui,
+              },
+            ]
+          : []),
       ],
     },
     ...(composioAvailable

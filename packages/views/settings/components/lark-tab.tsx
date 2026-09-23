@@ -112,12 +112,7 @@ export function LarkTab() {
           <CardContent className="space-y-2">
             <p className="text-body font-medium">{t(($) => $.lark.not_enabled_title)}</p>
             <p className="text-caption text-muted-foreground">
-              {t(($) => $.lark.not_enabled_description_prefix)}{" "}
-              <code className="rounded-xs bg-muted px-1 py-0.5 text-micro">
-                MULTICA_LARK_SECRET_KEY
-              </code>{" "}
-              {t(($) => $.lark.not_enabled_description_suffix)}{" "}
-              {t(($) => $.lark.not_enabled_self_host_hint)}
+              {t(($) => $.lark.not_enabled_description)}
             </p>
           </CardContent>
         </Card>

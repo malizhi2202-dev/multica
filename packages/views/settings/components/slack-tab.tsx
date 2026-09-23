@@ -96,12 +96,7 @@ export function SlackTab() {
           <CardContent className="space-y-2">
             <p className="text-body font-medium">{t(($) => $.slack.not_enabled_title)}</p>
             <p className="text-caption text-muted-foreground">
-              {t(($) => $.slack.not_enabled_description_prefix)}{" "}
-              <code className="rounded-xs bg-muted px-1 py-0.5 text-micro">
-                MULTICA_SLACK_SECRET_KEY
-              </code>{" "}
-              {t(($) => $.slack.not_enabled_description_suffix)}{" "}
-              {t(($) => $.slack.not_enabled_self_host_hint)}
+              {t(($) => $.slack.not_enabled_description)}
             </p>
           </CardContent>
         </Card>

@@ -12,6 +12,8 @@ import {
 } from "@multica/core/dingtalk";
 import { wecomInstallationsOptions } from "@multica/core/wecom";
 import { telegramInstallationsOptions } from "@multica/core/telegram";
+import { tuituiInstallationsOptions } from "@multica/core/tuitui";
+import { useConfigStore } from "@multica/core/config";
 import { memberListOptions } from "@multica/core/workspace/queries";
 import { LarkAgentBindButton } from "../../../settings/components/lark-tab";
 import { LarkMark } from "../../../settings/components/lark-mark";
@@ -28,6 +30,8 @@ import { WecomAgentBindButton } from "../../../settings/components/wecom-tab";
 import { WecomMark } from "../../../settings/components/wecom-mark";
 import { TelegramAgentBindButton } from "../../../settings/components/telegram-tab";
 import { TelegramMark } from "../../../settings/components/telegram-mark";
+import { TuituiAgentBindButton } from "../../../settings/components/tuitui-tab";
+import { TuituiMark } from "../../../settings/components/tuitui-mark";
 import { useT } from "../../../i18n";
 
 /**
@@ -71,6 +75,13 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
   const { data: telegramListing } = useQuery({
     ...telegramInstallationsOptions(wsId),
     enabled: !!wsId,
+  });
+  // Fail closed: hide the whole Tuitui section when the server predates the
+  // channel, rather than issuing an install query that can only 404.
+  const tuituiSupported = useConfigStore((s) => s.tuituiSupported);
+  const { data: tuituiListing } = useQuery({
+    ...tuituiInstallationsOptions(wsId),
+    enabled: !!wsId && tuituiSupported,
   });
   const { data: members = [] } = useQuery({
     ...memberListOptions(wsId),
@@ -150,6 +161,11 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
     telegramListing?.installations.some(
       (inst) => inst.agent_id === agent.id && inst.status === "active",
     ) ?? false;
+
+  const tuituiConfigured = tuituiListing?.configured === true;
+  // Tuitui follows the DingTalk per-agent rule: the target agent's owner or a
+  // workspace owner/admin may connect and disconnect it.
+  const canManageTuitui = isWorkspaceAdmin || isAgentOwner;
 
   // Preserve the established Integrations management gate: a member who can
   // manage no platform gets the read-only note instead of install controls.
@@ -438,6 +454,39 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
           )}
         </div>
       </section>
+
+      {tuituiSupported && (
+        <section className="rounded-lg border">
+          <div className="flex items-start gap-3 p-4">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground">
+              <TuituiMark className="h-5 w-5" />
+            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <h3 className="text-body font-medium">{ts(($) => $.tuitui.section_title)}</h3>
+              <p className="text-caption leading-relaxed text-muted-foreground">
+                {ts(($) => $.tuitui.page_description)}
+              </p>
+            </div>
+          </div>
+          <div className="border-t px-4 py-3">
+            {!canManageTuitui ? (
+              <p className="text-caption text-muted-foreground">
+                {t(($) => $.tab_body.integrations.members_note)}
+              </p>
+            ) : !tuituiConfigured ? (
+              <p className="text-caption text-muted-foreground">
+                {ts(($) => $.tuitui.not_enabled_title)}
+              </p>
+            ) : (
+              <TuituiAgentBindButton
+                agentId={agent.id}
+                agentName={agent.name}
+                agentOwnerId={agent.owner_id}
+              />
+            )}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

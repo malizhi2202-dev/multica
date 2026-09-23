@@ -169,6 +169,21 @@ vi.mock("../../../settings/components/telegram-tab", () => ({
   ),
 }));
 
+vi.mock("@multica/core/tuitui", () => ({
+  tuituiInstallationsOptions: (wsId: string) => ({
+    queryKey: ["tuitui", wsId, "installations"],
+    queryFn: vi.fn(),
+  }),
+}));
+
+vi.mock("../../../settings/components/tuitui-tab", () => ({
+  TuituiAgentBindButton: ({ agentId }: { agentId: string }) => (
+    <div data-testid="tuitui-bind-button" data-agent-id={agentId} />
+  ),
+}));
+
+import { configStore } from "@multica/core/config";
+
 import { IntegrationsTab } from "./integrations-tab";
 
 const TEST_RESOURCES = {
@@ -227,6 +242,7 @@ function resetFixtures() {
     isError: false,
     refetch: vi.fn(),
   };
+  configStore.getState().setTuituiSupported(false);
 }
 
 describe("IntegrationsTab", () => {
@@ -278,6 +294,18 @@ describe("IntegrationsTab", () => {
     expect(screen.getByTestId("lark-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
     expect(screen.getByTestId("slack-bind-button").getAttribute("data-agent-id")).toBe("agent-1");
     expect(screen.getByTestId("telegram-bind-button").getAttribute("data-agent-id")).toBe(
+      "agent-1",
+    );
+    // Tuitui stays hidden until /api/config declares it (fail-closed).
+    expect(screen.queryByText("Tuitui")).toBeNull();
+    expect(screen.queryByTestId("tuitui-bind-button")).toBeNull();
+  });
+
+  it("renders the Tuitui bind entry once the server declares the channel supported", () => {
+    configStore.getState().setTuituiSupported(true);
+    renderTab(<IntegrationsTab agent={agent} />);
+    expect(screen.getByText("Tuitui")).toBeTruthy();
+    expect(screen.getByTestId("tuitui-bind-button").getAttribute("data-agent-id")).toBe(
       "agent-1",
     );
   });
@@ -537,7 +565,7 @@ describe("IntegrationsTab", () => {
       install_supported: false,
     };
     renderTab(<IntegrationsTab agent={agent} />);
-    expect(screen.getByText(/Lark integration not enabled/i)).toBeTruthy();
+    expect(screen.getByText(/Lark integration is currently unavailable/i)).toBeTruthy();
     expect(screen.queryByTestId("lark-bind-button")).toBeNull();
   });
 

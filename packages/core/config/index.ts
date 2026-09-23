@@ -41,6 +41,11 @@ interface ConfigState {
   // Older handlers accepted the unknown field and returned success while
   // dropping it, so absent must fail closed.
   agentConversationStartersSupported: boolean;
+  // Whether this server serves the Tuitui (推推) channel endpoints. Servers
+  // predating the channel omit `tuitui_supported` from /api/config, and the
+  // only safe reading of "absent" is unsupported — the Settings entry and the
+  // agent-side bind CTA stay hidden instead of issuing 404s. Fail closed.
+  tuituiSupported: boolean;
   // Whether deleting a comment keeps its replies (#8296). Older servers
   // deleted the replies too, so absent must fail closed: the client then
   // promises nothing about replies and uses the legacy delete route.
@@ -61,6 +66,7 @@ interface ConfigState {
   setLocalWorktreeSupported: (supported?: boolean) => void;
   setLocalDirBrowserSupported: (supported?: boolean) => void;
   setAgentConversationStartersSupported: (supported?: boolean) => void;
+  setTuituiSupported: (supported?: boolean) => void;
   setCommentDeleteKeepRepliesSupported: (supported?: boolean) => void;
 }
 
@@ -78,6 +84,8 @@ export const configStore = createStore<ConfigState>((set) => ({
   localWorktreeSupported: false,
   localDirBrowserSupported: false,
   agentConversationStartersSupported: false,
+  // Fail closed: a server that predates the channel must not get channel UI.
+  tuituiSupported: false,
   commentDeleteKeepRepliesSupported: false,
   setCdnConfig: ({ cdnDomain, cdnSigned = false }) => set({ cdnDomain, cdnSigned }),
   setAuthConfig: ({
@@ -96,6 +104,8 @@ export const configStore = createStore<ConfigState>((set) => ({
     set({ localDirBrowserSupported: supported === true }),
   setAgentConversationStartersSupported: (supported = false) =>
     set({ agentConversationStartersSupported: supported === true }),
+  setTuituiSupported: (supported = false) =>
+    set({ tuituiSupported: supported === true }),
   setCommentDeleteKeepRepliesSupported: (supported = false) =>
     set({ commentDeleteKeepRepliesSupported: supported === true }),
 }));

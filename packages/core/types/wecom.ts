@@ -17,9 +17,12 @@ export interface WecomInstallation {
 
 export interface ListWecomInstallationsResponse {
   installations: WecomInstallation[];
-  /** Whether MULTICA_WECOM_SECRET_KEY is set on this deployment. When false the
-   * BYO Connect button is hidden and the panel renders an "ask the operator"
-   * state. */
+  /** Whether the WeCom integration is currently usable on this deployment.
+   * Channel credentials are entered in the UI and sealed at rest with the
+   * deployment's data key (an environment override is optional), so false
+   * means "this integration is currently unavailable" — not "an operator has
+   * no env var to set". When false the BYO Connect button is hidden and the
+   * panel renders the "currently unavailable" state. */
   configured: boolean;
   /** Whether the install path is available (true whenever configured). Kept as
    * a separate flag for parity with Slack / Lark; optional so a desktop build
@@ -30,8 +33,8 @@ export interface ListWecomInstallationsResponse {
 /** Request body for the Web UI's BYO Connect dialog. The first two fields are
  * copied from the WeCom admin console's smart-bot page: the bot's stable
  * identifier and its long-connection secret. The backend seals the secret
- * with the deployment's MULTICA_WECOM_SECRET_KEY before writing it, so
- * plaintext never lands in the DB. */
+ * with the deployment's at-rest data key before writing it, so plaintext
+ * never lands in the DB. */
 export interface RegisterWecomBYORequest {
   bot_id: string;
   secret: string;

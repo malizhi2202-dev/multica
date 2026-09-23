@@ -160,7 +160,7 @@ describe("SlackTab", () => {
   it("surfaces the not-enabled notice when the deployment has no Slack key", () => {
     installationsRef.current = { installations: [], configured: false, install_supported: false };
     renderUI(<SlackTab />);
-    expect(screen.getByText(/Slack integration not enabled/i)).toBeTruthy();
+    expect(screen.getByText(/Slack integration is currently unavailable/i)).toBeTruthy();
   });
 
   it("shows the empty state when configured but nothing is connected", () => {

@@ -248,6 +248,16 @@ export type {
   RedeemWecomBindingTokenResponse,
 } from "./wecom";
 export type {
+  TuituiInstallation,
+  ListTuituiInstallationsResponse,
+  TuituiGroupBot,
+  TuituiGroup,
+  ListTuituiGroupsResponse,
+  ListTuituiGroupsParams,
+  RegisterTuituiBYORequest,
+  RedeemTuituiBindingTokenResponse,
+} from "./tuitui";
+export type {
   TelegramInstallation,
   ListTelegramInstallationsResponse,
   RegisterTelegramRequest,

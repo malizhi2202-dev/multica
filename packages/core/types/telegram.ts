@@ -21,9 +21,12 @@ export interface TelegramInstallation {
 
 export interface ListTelegramInstallationsResponse {
   installations: TelegramInstallation[];
-  /** Whether the deployment has the at-rest secret key configured. When false
-   * the connect entry points are hidden and the panel renders an "ask the
-   * operator to enable Telegram" state. */
+  /** Whether the Telegram integration is currently usable on this deployment.
+   * Channel credentials are entered in the UI and sealed at rest with the
+   * deployment's data key (an environment override is optional), so false
+   * means "this integration is currently unavailable" — not "an operator has
+   * no env var to set". When false the connect entry points are hidden and
+   * the panel renders the "currently unavailable" state. */
   configured: boolean;
   /** Whether the install path is available (true whenever Telegram is
    * configured — a pasted BotFather token needs no hosted credential).

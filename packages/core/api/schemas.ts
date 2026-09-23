@@ -41,6 +41,10 @@ import type {
   WecomInstallation,
   ListWecomInstallationsResponse,
   RedeemWecomBindingTokenResponse,
+  TuituiInstallation,
+  ListTuituiInstallationsResponse,
+  ListTuituiGroupsResponse,
+  RedeemTuituiBindingTokenResponse,
   TelegramInstallation,
   ListTelegramInstallationsResponse,
   RedeemTelegramBindingTokenResponse,
@@ -767,6 +771,12 @@ export interface AppConfigResponse {
    * DELETE /api/comments/{id}/keep-replies. Older servers deleted the replies
    * too, so absent must be treated as false (#8296). */
   comment_delete_keep_replies_supported?: boolean;
+  /** Whether this deployment serves the Tuitui (推推) channel endpoints
+   * (`/api/workspaces/{id}/tuitui/*`, `/api/tuitui/binding/redeem`). Servers
+   * predating the channel omit the field; absent must be read as unsupported
+   * so the Settings entry and the agent-side bind CTA stay hidden rather than
+   * issuing requests that can only 404. */
+  tuitui_supported?: boolean;
   server_version?: string;
 }
 
@@ -1013,6 +1023,9 @@ export const AppConfigSchema = z.object({
   local_dir_browser_supported: BooleanWithDefaultSchema(false),
   agent_conversation_starters_supported: BooleanWithDefaultSchema(false),
   comment_delete_keep_replies_supported: BooleanWithDefaultSchema(false),
+  // Fail closed: a server that predates the Tuitui channel must not get
+  // channel UI that can only 404.
+  tuitui_supported: BooleanWithDefaultSchema(false),
   server_version: OptionalStringSchema,
 }).loose();
 
@@ -1035,6 +1048,9 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   agent_conversation_starters_supported: false,
   // Fail closed: old servers delete a comment's replies with it.
   comment_delete_keep_replies_supported: false,
+  // Fail closed: an unreadable config must not surface Tuitui UI against a
+  // server that does not serve the endpoints.
+  tuitui_supported: false,
   feature_flags: {},
 };
 
@@ -3202,11 +3218,97 @@ export const EMPTY_REDEEM_DINGTALK_BINDING_TOKEN_RESPONSE: RedeemDingTalkBinding
   dingtalk_user_id: "",
 };
 
+// Tuitui (推推) is the fifth isomorphic IM channel — BYO-app install, group
+// discovery, and user-level binding redeem, all shaped like DingTalk.
+// `.loose()` so a newer backend field never fails the parse on an older
+// desktop build (AGENTS.md → API Compatibility). Defaults fail closed:
+// `configured` defaults false so a broken read renders the "integration
+// currently unavailable" state instead of a BYO dialog whose submit cannot
+// work, and a missing `status` defaults to "revoked" so a torn read never
+// shows a robot as connected when it may not be. Unknown `bot_identity_issue`
+// strings are plain data the row renders generically, so no enum mapping is
+// needed.
+export const TuituiInstallationSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  installer_user_id: z.string().default(""),
+  status: z.string().default("revoked"),
+  installed_at: z.string().default(""),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+  agent_available: z.boolean().optional(),
+  bound_tuitui_user_ids: z.array(z.string()).catch([]).default([]),
+}).loose();
+
+export const EMPTY_TUITUI_INSTALLATION: TuituiInstallation = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  installer_user_id: "",
+  status: "revoked",
+  installed_at: "",
+  created_at: "",
+  updated_at: "",
+  bound_tuitui_user_ids: [],
+};
+
+export const ListTuituiInstallationsResponseSchema = z.object({
+  installations: z.array(TuituiInstallationSchema).default([]),
+  configured: z.boolean().default(false),
+}).loose();
+
+export const EMPTY_LIST_TUITUI_INSTALLATIONS_RESPONSE: ListTuituiInstallationsResponse = {
+  installations: [],
+  configured: false,
+};
+
+export const TuituiGroupBotSchema = z.object({
+  installation_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  bot_name: z.string().default(""),
+  bot_identity_issue: z.string().default(""),
+  last_active_at: z.string().optional(),
+  mention_count: z.number().int().nonnegative().optional(),
+}).loose();
+
+export const TuituiGroupSchema = z.object({
+  conversation_id: z.string(),
+  conversation_title: z.string().default(""),
+  bots: z.array(TuituiGroupBotSchema).catch([]).default([]),
+}).loose();
+
+export const ListTuituiGroupsResponseSchema = z.object({
+  groups: z.array(TuituiGroupSchema).default([]),
+  group_discovery_supported: z.boolean().default(false),
+  inactive_group_counts: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  bot_identities: z.record(z.string(), TuituiGroupBotSchema).optional(),
+  next_offset: z.number().int().nonnegative().optional(),
+}).loose();
+
+export const EMPTY_LIST_TUITUI_GROUPS_RESPONSE: ListTuituiGroupsResponse = {
+  groups: [],
+  group_discovery_supported: false,
+};
+
+export const RedeemTuituiBindingTokenResponseSchema = z.object({
+  workspace_id: z.string().default(""),
+  installation_id: z.string().default(""),
+  tuitui_user_id: z.string().default(""),
+}).loose();
+
+export const EMPTY_REDEEM_TUITUI_BINDING_TOKEN_RESPONSE: RedeemTuituiBindingTokenResponse = {
+  workspace_id: "",
+  installation_id: "",
+  tuitui_user_id: "",
+};
+
 // WeCom smart-bot ("智能机器人" / aibot) installation responses. `.loose()` so a
 // newer backend field never fails the parse on an older desktop build (see
 // CLAUDE.md → API Compatibility). Defaults are chosen so a malformed response
-// degrades safely: `configured` defaults false (renders the "ask your operator"
-// state rather than a Connect dialog whose submit is guaranteed to fail), and a
+// degrades safely: `configured` defaults false (renders the "integration
+// currently unavailable" state rather than a Connect dialog whose submit is
+// guaranteed to fail), and a
 // missing `status` defaults to "revoked" rather than "active" so a broken read
 // never shows a bot as connected when it may not be.
 export const WecomInstallationSchema = z.object({

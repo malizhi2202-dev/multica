@@ -31,8 +31,12 @@ export interface ListVCSConnectionsResponse {
    * renders (visibility is also gated by vcs_integration_available on
    * /api/config, which is the authoritative deployment signal). */
   available?: boolean;
-  /** Whether the deployment has MULTICA_VCS_SECRET_KEY configured. When false
-   * the connect form is disabled. Older backends omit it; treat as false. */
+  /** Whether the deployment can currently serve Git provider connections —
+   * its signing secret is available. This is a real feature switch on the VCS
+   * side (`available` / `vcs_integration_available` gate whether the section
+   * is offered at all), distinct from the messaging channels' shared data key;
+   * false disables the connect form. It is not something the operator pastes a
+   * value for in the UI. Older backends omit it; treat as false (fail closed). */
   configured?: boolean;
   /** Whether the caller can connect / disconnect. Non-admins get false. */
   can_manage?: boolean;

@@ -586,12 +586,7 @@ export function DingTalkTab() {
           <CardContent className="space-y-2">
             <p className="text-body font-medium">{t(($) => $.dingtalk.not_enabled_title)}</p>
             <p className="text-caption text-muted-foreground">
-              {t(($) => $.dingtalk.not_enabled_description_prefix)}{" "}
-              <code className="rounded-xs bg-muted px-1 py-0.5 text-micro">
-                MULTICA_DINGTALK_SECRET_KEY
-              </code>{" "}
-              {t(($) => $.dingtalk.not_enabled_description_suffix)}{" "}
-              {t(($) => $.dingtalk.not_enabled_self_host_hint)}
+              {t(($) => $.dingtalk.not_enabled_description)}
             </p>
           </CardContent>
         </Card>

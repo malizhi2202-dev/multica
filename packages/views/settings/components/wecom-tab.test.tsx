@@ -284,7 +284,7 @@ describe("WecomTab", () => {
   it("surfaces the not-enabled notice when the deployment has no WeCom key", () => {
     installationsRef.current = { installations: [], configured: false, install_supported: false };
     renderUI(<WecomTab />);
-    expect(screen.getByText(/WeCom integration not enabled/i)).toBeTruthy();
+    expect(screen.getByText(/WeCom integration is currently unavailable/i)).toBeTruthy();
   });
 
   it("shows the empty state when configured but nothing is connected", () => {

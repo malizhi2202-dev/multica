@@ -719,6 +719,195 @@ describe("ApiClient schema fallback", () => {
     });
   });
 
+  describe("Tuitui integration", () => {
+    it("falls back to a safe empty installation shape when the response is malformed", async () => {
+      // Same white-screen guard as DingTalk: `configured` must degrade to
+      // false so the panel renders the unavailable state, never a broken BYO
+      // form.
+      stubFetchJson({ installations: "not-an-array", configured: true });
+      const client = new ApiClient("https://api.example.test");
+      await expect(client.listTuituiInstallations("ws-1")).resolves.toEqual({
+        installations: [],
+        configured: false,
+      });
+    });
+
+    it("defaults old-server fields and keeps new-server linked identities", async () => {
+      stubFetchJson({
+        installations: [
+          { id: "tt-old", status: "active" },
+          {
+            id: "tt-1",
+            status: "active",
+            agent_available: false,
+            bound_tuitui_user_ids: ["tt-user-1001"],
+          },
+          { id: "tt-broken", status: "active", bound_tuitui_user_ids: "not-an-array" },
+        ],
+        configured: true,
+        install_supported: true,
+        future_field: true,
+      });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listTuituiInstallations("ws-1");
+      expect(res.configured).toBe(true);
+      // The Tuitui contract carries no install_supported flag. `.loose()`
+      // keeps a stray field as inert data on the parsed object, but no
+      // frontend type or UI reads it — `configured` is the sole gate.
+      expect(Object.keys(res)).toContain("install_supported");
+      expect(res.installations[0]).toMatchObject({
+        id: "tt-old",
+        workspace_id: "",
+        agent_id: "",
+        installer_user_id: "",
+        bound_tuitui_user_ids: [],
+      });
+      expect(res.installations[1]?.agent_available).toBe(false);
+      expect(res.installations[1]?.bound_tuitui_user_ids).toEqual(["tt-user-1001"]);
+      expect(res.installations[2]?.bound_tuitui_user_ids).toEqual([]);
+    });
+
+    it("keeps a torn status row out of the connected default", async () => {
+      stubFetchJson({
+        installations: [{ id: "tt-1", workspace_id: "ws-1" }],
+        configured: true,
+      });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listTuituiInstallations("ws-1");
+      expect(res.installations[0]?.status).toBe("revoked");
+    });
+
+    it("parses group bot metadata and encodes the forget route", async () => {
+      stubFetchJson({
+        groups: [
+          {
+            conversation_id: "teams_9_eng_42",
+            conversation_title: "Platform",
+            bots: [
+              {
+                installation_id: "inst-1",
+                agent_id: "agent-1",
+                bot_name: "Pushy",
+                last_active_at: "2026-08-19T08:00:00Z",
+                mention_count: 7,
+              },
+            ],
+          },
+          { conversation_id: "cid-no-title", bots: "not-an-array" },
+        ],
+        group_discovery_supported: true,
+        bot_identities: {
+          "inst-1": { installation_id: "inst-1", bot_name: "Pushy" },
+        },
+      });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listTuituiGroups("ws-1");
+      expect(res.groups[0]?.bots[0]).toMatchObject({
+        bot_name: "Pushy",
+        last_active_at: "2026-08-19T08:00:00Z",
+        mention_count: 7,
+      });
+      // A malformed bot list degrades that one group, not the whole panel.
+      expect(res.groups[1]).toEqual({
+        conversation_id: "cid-no-title",
+        conversation_title: "",
+        bots: [],
+      });
+      expect(res.bot_identities?.["inst-1"]).toMatchObject({ bot_name: "Pushy" });
+
+      stubFetchJson({ groups: [], group_discovery_supported: true });
+      await client.listTuituiGroups("ws-1", {
+        activity: "inactive",
+        installationId: "inst-1",
+        offset: 20,
+        limit: 10,
+      });
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/workspaces/ws-1/tuitui/groups?activity=inactive&installation_id=inst-1&offset=20&limit=10",
+        expect.any(Object),
+      );
+      stubFetchJson({ groups: [], group_discovery_supported: true });
+      await client.listAgentTuituiGroups("agent-1");
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/agents/agent-1/tuitui/groups",
+        expect.any(Object),
+      );
+
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+      await client.forgetTuituiGroup("ws-1", "inst-1", "teams_9/eng_42");
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/workspaces/ws-1/tuitui/installations/inst-1/groups/teams_9%2Feng_42",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    });
+
+    it("treats a pre-group-discovery backend as unsupported but keeps real failures visible", async () => {
+      const client = new ApiClient("https://api.example.test");
+      stubFetchJson({ error: "not found" }, 404);
+      await expect(client.listTuituiGroups("ws-1")).resolves.toEqual({
+        groups: [],
+        group_discovery_supported: false,
+      });
+      stubFetchJson({ error: "forbidden" }, 403);
+      await expect(client.listTuituiGroups("ws-1")).resolves.toEqual({
+        groups: [],
+        group_discovery_supported: false,
+      });
+      stubFetchJson({ error: "unavailable" }, 503);
+      await expect(client.listTuituiGroups("ws-1")).rejects.toMatchObject({
+        status: 503,
+      });
+    });
+
+    it("posts BYO credentials to the agent-tagged route and disconnects by id", async () => {
+      stubFetchJson({ id: "inst-9", status: "active" });
+      const client = new ApiClient("https://api.example.test");
+      await client.registerTuituiBYO("ws-1", "agent-1", {
+        app_id: "app-1",
+        app_secret: "sec-1",
+      });
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/workspaces/ws-1/tuitui/install/byo?agent_id=agent-1",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ app_id: "app-1", app_secret: "sec-1" }),
+        }),
+      );
+
+      stubFetchJson({ id: 123 });
+      await expect(
+        client.registerTuituiBYO("ws-1", "agent-1", { app_id: "a", app_secret: "b" }),
+      ).resolves.toMatchObject({ id: "", status: "revoked" });
+
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+      await client.deleteTuituiInstallation("ws-1", "inst-9");
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/workspaces/ws-1/tuitui/installations/inst-9",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    });
+
+    it("redeems a binding token with an empty-string fallback, never a crash", async () => {
+      const client = new ApiClient("https://api.example.test");
+      stubFetchJson({
+        workspace_id: "ws-1",
+        installation_id: "inst-1",
+        tuitui_user_id: "tt-user-1",
+      });
+      await expect(client.redeemTuituiBindingToken("tok-1")).resolves.toEqual({
+        workspace_id: "ws-1",
+        installation_id: "inst-1",
+        tuitui_user_id: "tt-user-1",
+      });
+      stubFetchJson({ workspace_id: 123 });
+      await expect(client.redeemTuituiBindingToken("tok-2")).resolves.toEqual({
+        workspace_id: "",
+        installation_id: "",
+        tuitui_user_id: "",
+      });
+    });
+  });
+
   describe("getConfig", () => {
     it("drops malformed daemon setup URLs instead of throwing", async () => {
       stubFetchJson({
@@ -736,6 +925,26 @@ describe("ApiClient schema fallback", () => {
       expect(config.daemon_server_url).toBeUndefined();
       expect(config.daemon_app_url).toBeUndefined();
       expect(config.feature_flags?.composio_mcp_apps).toBe(true);
+    });
+
+    it("fails closed on an absent or malformed tuitui_supported flag", async () => {
+      const client = new ApiClient("https://api.example.test");
+
+      stubFetchJson({ allow_signup: true });
+      await expect(
+        client.getConfig().then((config) => config.tuitui_supported),
+      ).resolves.toBe(false);
+
+      stubFetchJson({ allow_signup: true, tuitui_supported: true });
+      await expect(
+        client.getConfig().then((config) => config.tuitui_supported),
+      ).resolves.toBe(true);
+
+      // A non-boolean from a half-upgraded server must not light up Tuitui UI.
+      stubFetchJson({ allow_signup: true, tuitui_supported: "yes" });
+      await expect(
+        client.getConfig().then((config) => config.tuitui_supported),
+      ).resolves.toBe(false);
     });
   });
 
