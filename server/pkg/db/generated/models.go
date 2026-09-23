@@ -795,6 +795,12 @@ type InboxItem struct {
 	Details       []byte             `json:"details"`
 }
 
+type InstanceSecret struct {
+	KeyName   string             `json:"key_name"`
+	Secret    []byte             `json:"secret"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type InstanceTelemetryState struct {
 	Singleton         bool               `json:"singleton"`
 	InstanceID        pgtype.UUID        `json:"instance_id"`
