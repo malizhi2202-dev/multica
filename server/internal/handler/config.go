@@ -88,6 +88,19 @@ type AppConfig struct {
 	// replies unless it is declared.
 	CommentDeleteKeepRepliesSupported bool `json:"comment_delete_keep_replies_supported"`
 
+	// LocalDirBrowserSupported tells clients that GET
+	// /api/workspaces/{id}/local-dirs exists — server-side browsing of the
+	// deployment machine's directory tree, so a web client can pick a
+	// local_directory project resource without the desktop app's native
+	// folder picker.
+	//
+	// Load-bearing for CLIENTS, not for this server. Releases before this one
+	// never served the route and say nothing about it, so absent must be read
+	// as "cannot browse": the client keeps offering only the desktop picker
+	// and manual path entry rather than pointing users at an endpoint that
+	// answers 404.
+	LocalDirBrowserSupported bool `json:"local_dir_browser_supported"`
+
 	// ServerVersion is the running API build version, so self-hosted
 	// operators can confirm what's deployed and include it in bug reports.
 	// Only emitted on self-hosted deployments — omitted on the managed cloud,
@@ -107,6 +120,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		LocalWorktreeSupported:             true,
 		AgentConversationStartersSupported: true,
 		CommentDeleteKeepRepliesSupported:  true,
+		LocalDirBrowserSupported:           true,
 		AllowSignup:                        os.Getenv("ALLOW_SIGNUP") != "false",
 		GoogleClientID:                     os.Getenv("GOOGLE_CLIENT_ID"),
 		WorkspaceCreationDisabled:          os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",

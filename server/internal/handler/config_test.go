@@ -576,3 +576,30 @@ func TestGetConfigDeclaresCommentDeleteKeepsReplies(t *testing.T) {
 		t.Fatalf("comment_delete_keep_replies_supported = %v, want true", raw["comment_delete_keep_replies_supported"])
 	}
 }
+
+// The web local_directory picker offers server-side browsing only when the
+// backend serves /api/workspaces/{id}/local-dirs. Older servers omit the
+// declaration and 404 the route, so clients must fall back to the desktop
+// picker and manual path entry unless this build says otherwise.
+func TestGetConfigDeclaresLocalDirBrowserSupport(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	w := httptest.NewRecorder()
+	testHandler.GetConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetConfig: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var cfg AppConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if !cfg.LocalDirBrowserSupported {
+		t.Fatal("this build serves the directory browser but does not advertise it; clients will hide the picker")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw config: %v", err)
+	}
+	if raw["local_dir_browser_supported"] != true {
+		t.Fatalf("local_dir_browser_supported = %v, want true", raw["local_dir_browser_supported"])
+	}
+}

@@ -775,6 +775,49 @@ func (q *Queries) ListDaemonCustomNames(ctx context.Context, arg ListDaemonCusto
 	return items, nil
 }
 
+const listOnlineDaemonIDsByDevice = `-- name: ListOnlineDaemonIDsByDevice :many
+SELECT DISTINCT daemon_id FROM agent_runtime
+WHERE workspace_id = $1
+  AND status = 'online'
+  AND daemon_id IS NOT NULL
+  AND split_part(device_info, ' · ', 1) = $2
+`
+
+type ListOnlineDaemonIDsByDeviceParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DeviceInfo  string      `json:"device_info"`
+}
+
+// Distinct daemon_ids of the online runtimes this workspace knows under one
+// device name. The server-side directory browser uses it to bind a browsed
+// path to the daemon that owns the filesystem being browsed. device_info is
+// what the daemon reported at registration — the device name (the hostname
+// by default) with " · <version>" appended when the runtime carries one (see
+// the registration loop in handler/daemon.go) — so the comparison runs
+// against the device-name part in front of that separator. One machine
+// carries several provider rows, all collapsed here via DISTINCT; zero /
+// many results tell the caller the machine's daemon is unresolvable rather
+// than guessing.
+func (q *Queries) ListOnlineDaemonIDsByDevice(ctx context.Context, arg ListOnlineDaemonIDsByDeviceParams) ([]pgtype.Text, error) {
+	rows, err := q.db.Query(ctx, listOnlineDaemonIDsByDevice, arg.WorkspaceID, arg.DeviceInfo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.Text{}
+	for rows.Next() {
+		var daemon_id pgtype.Text
+		if err := rows.Scan(&daemon_id); err != nil {
+			return nil, err
+		}
+		items = append(items, daemon_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStaleOfflineRuntimeGCCandidates = `-- name: ListStaleOfflineRuntimeGCCandidates :many
 SELECT id FROM agent_runtime
 WHERE status = 'offline'

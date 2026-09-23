@@ -1637,6 +1637,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 						r.Delete("/", h.DeleteMember)
 					})
 					r.Delete("/invitations/{invitationId}", h.RevokeInvitation)
+					// Server-side directory browsing for local_directory
+					// resources. Admin-only on purpose: unlike the desktop
+					// picker — where the user chooses a folder on their own
+					// machine — this read endpoint exposes the deployment
+					// host's whole filesystem (minus the blacklisted system
+					// roots) to any client that can reach the API.
+					r.Get("/local-dirs", h.ListWorkspaceLocalDirs)
 					// Curating the shared MCP library is an admin action.
 					// Creating an entry binds it to no agent; an agent owner
 					// adds it to their own agent through the agent routes.

@@ -555,3 +555,20 @@ SELECT EXISTS (
 -- Final fail-closed assertion after UnbindTasksFromRuntime. A non-zero result
 -- aborts the transaction instead of relying on the legacy ON DELETE CASCADE.
 SELECT count(*) FROM agent_task_queue WHERE runtime_id = $1;
+
+-- name: ListOnlineDaemonIDsByDevice :many
+-- Distinct daemon_ids of the online runtimes this workspace knows under one
+-- device name. The server-side directory browser uses it to bind a browsed
+-- path to the daemon that owns the filesystem being browsed. device_info is
+-- what the daemon reported at registration — the device name (the hostname
+-- by default) with " · <version>" appended when the runtime carries one (see
+-- the registration loop in handler/daemon.go) — so the comparison runs
+-- against the device-name part in front of that separator. One machine
+-- carries several provider rows, all collapsed here via DISTINCT; zero /
+-- many results tell the caller the machine's daemon is unresolvable rather
+-- than guessing.
+SELECT DISTINCT daemon_id FROM agent_runtime
+WHERE workspace_id = @workspace_id
+  AND status = 'online'
+  AND daemon_id IS NOT NULL
+  AND split_part(device_info, ' · ', 1) = @device_info;
