@@ -247,25 +247,31 @@ func (f *tuituiRouteFixture) replier() *OutboundReplier {
 	})
 }
 
-// router builds a Router over the real ResolverSet. The task enqueuer and
-// issue creator are fakes: this suite asserts what the pipeline persists and
-// delivers, not what the agent runtime would run.
+// router builds a Router over the real ResolverSet with the Media slot
+// unwired (the state of a deployment without an object-storage backend).
+// The task enqueuer and issue creator are fakes: this suite asserts what
+// the pipeline persists and delivers, not what the agent runtime would run.
 func (f *tuituiRouteFixture) router(replier engine.OutboundReplier, tasks *fakeTaskEnqueuer) *engine.Router {
+	return f.routerWithMedia(replier, tasks, nil)
+}
+
+func (f *tuituiRouteFixture) routerWithMedia(replier engine.OutboundReplier, tasks *fakeTaskEnqueuer, media engine.MediaResolver) *engine.Router {
 	r := engine.NewRouter(fakeIssueCreator{}, tasks, f.q, engine.RouterConfig{Logger: testDiscardLogger()})
-	r.Register(TypeTuitui, NewTuituiResolverSet(f.q, f.pool, replier))
+	r.Register(TypeTuitui, NewTuituiResolverSet(f.q, f.pool, replier, media))
 	return r
 }
 
-// issueRouter is router() with the real IssueService in place of the fake, so
-// an /issue command writes a real issue row and the test can ask the database
-// what provenance that row carries. The outbound replier stays nil: this
-// suite reads the row, it does not assert the chat notice.
+// issueRouter builds a Router over the real ResolverSet with the real
+// IssueService in place of the fake, so an /issue command writes a real
+// issue row and the test can ask the database what provenance that row
+// carries. The outbound replier stays nil: this suite reads the row, it
+// does not assert the chat notice.
 func (f *tuituiRouteFixture) issueRouter(tasks *fakeTaskEnqueuer) *engine.Router {
 	bus := events.New()
 	issueService := service.NewIssueService(f.q, f.pool, bus, nil,
 		&service.TaskService{Queries: f.q, TxStarter: f.pool, Bus: bus})
 	r := engine.NewRouter(issueService, tasks, f.q, engine.RouterConfig{Logger: testDiscardLogger()})
-	r.Register(TypeTuitui, NewTuituiResolverSet(f.q, f.pool, nil))
+	r.Register(TypeTuitui, NewTuituiResolverSet(f.q, f.pool, nil, nil))
 	return r
 }
 
@@ -528,21 +534,25 @@ func TestTuituiRouterBoundUserGetsNoPrompts(t *testing.T) {
 	}
 }
 
-// TestTuituiRouterNilMediaResolverTolerated pins the deliberate Media=nil
-// slot: inbound media arrives as placeholder text (urls only in Text/Raw,
-// MediaRefs empty), so the Router must ingest without ever touching the
-// absent resolver — no panic, no deferred media state.
+// TestTuituiRouterNilMediaResolverTolerated pins the store-less deployment
+// shape: with the Media slot unwired the Router must ingest a media frame
+// without ever touching the absent resolver — no panic, no deferred media
+// state — and the durable body must still carry only the placeholder (the
+// signed url stays in Raw, which nothing renders).
 func TestTuituiRouterNilMediaResolverTolerated(t *testing.T) {
 	f := newTuituiRouteFixture(t)
 	f.bindSender()
-	set := NewTuituiResolverSet(f.q, f.pool, nil)
-	if set.Media != nil || set.Typing != nil {
-		t.Fatalf("set has Media=%v Typing=%v, want both nil until they are honest", set.Media, set.Typing)
+	set := NewTuituiResolverSet(f.q, f.pool, nil, nil)
+	if set.Media != nil {
+		t.Fatalf("set has Media=%v, want nil when no resolver is supplied", set.Media)
+	}
+	if set.Typing != nil {
+		t.Fatalf("set has Typing=%v, want nil: the platform protocol has no typing capability", set.Typing)
 	}
 	r := f.router(nil, &fakeTaskEnqueuer{})
 
 	msg := f.inbound(t, eventSingleChat, f.sender,
-		`{"msgid":"m-img-1","msg_type":"image","images":["https://media.tuitui.test/a.png"]}`)
+		`{"msgid":"m-img-1","msg_type":"image","images":["https://media.tuitui.test/a.png?sig=topsecret"]}`)
 	if msg.Type != channel.MsgTypeImage || len(msg.MediaRefs) != 0 {
 		t.Fatalf("normalized media msg = %+v", msg)
 	}
@@ -556,6 +566,130 @@ func TestTuituiRouterNilMediaResolverTolerated(t *testing.T) {
 		JOIN channel_chat_session_binding b ON b.chat_session_id = m.chat_session_id
 		WHERE b.installation_id = $1`, f.installationStr); got != 1 {
 		t.Errorf("ingested media messages = %d, want 1", got)
+	}
+	var body string
+	f.fx.QueryRow(t, `
+		SELECT m.content FROM chat_message m
+		JOIN channel_chat_session_binding b ON b.chat_session_id = m.chat_session_id
+		WHERE b.installation_id = $1`, f.installationStr).Scan(&body)
+	if body != "[图片]" {
+		t.Errorf("durable body = %q, want the bare placeholder", body)
+	}
+	// Without a resolver nothing may claim a media deadline: the deferred
+	// run machinery must stay untouched.
+	if got := f.fx.Count(t, `
+		SELECT count(*) FROM chat_message m
+		JOIN channel_chat_session_binding b ON b.chat_session_id = m.chat_session_id
+		WHERE b.installation_id = $1 AND m.channel_media_pending_until IS NOT NULL`,
+		f.installationStr); got != 0 {
+		t.Errorf("media-pending rows without a resolver = %d, want 0", got)
+	}
+}
+
+// TestTuituiRouterInboundImageBindsAttachmentAndIntent is the full media
+// route over the real ResolverSet: an image frame whose signed url points
+// at an httptest host, resolved by the real resolver + real
+// engine.NewDBMediaIntentLedger against the fixture database. It asserts
+// the end-to-end contract each piece was written for — the session binding
+// exists, the attachment row was created from the resolver's object with
+// the storage URL (never the signed platform URL), the intent ledger row
+// was claimed (deleted) by the bind transaction, the pending deadline
+// cleared, and the durable body never shows the raw link.
+func TestTuituiRouterInboundImageBindsAttachmentAndIntent(t *testing.T) {
+	f := newTuituiRouteFixture(t)
+	f.bindSender()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(mediaTestPNG)
+	}))
+	t.Cleanup(srv.Close)
+
+	// The engine writes attachment + pending-intent rows the Fixture's
+	// per-row cleanup cannot reach.
+	f.fx.Cleanup(t, `DELETE FROM attachment WHERE workspace_id = $1`, f.workspaceIDStr)
+
+	store := newFakeMediaStore()
+	resolver := NewMediaResolver(store, engine.NewDBMediaIntentLedger(f.q), testDiscardLogger()).(*mediaResolver)
+	// Injectable client: this test must never dial, and httptest's plain
+	// loopback server is exactly what the production guard refuses.
+	resolver.fetch = srv.Client()
+
+	tasks := &fakeTaskEnqueuer{}
+	r := f.routerWithMedia(nil, tasks, resolver)
+
+	msg := f.inbound(t, eventSingleChat, f.sender,
+		`{"msgid":"m-img-2","msg_type":"image","images":["`+srv.URL+`/a.png?sig=topsecret"]}`)
+	if err := r.Handle(context.Background(), msg); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// The durable message lands on the ACK path; media resolution and the
+	// bind are detached, so poll rather than sleep — router.Drain is NOT
+	// usable as the wait here, it cancels the media context that the bind
+	// still needs (the WeCom media-bind DB test's discovery, reused).
+	var messageID, sessionID, body string
+	var attachments int
+	var settled bool
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		err := f.pool.QueryRow(context.Background(), `
+			SELECT m.id::text, m.chat_session_id::text, m.content,
+			       (SELECT count(*) FROM attachment a WHERE a.chat_message_id = m.id),
+			       m.channel_media_pending_until IS NULL
+			FROM chat_message m
+			JOIN channel_chat_session_binding b ON b.chat_session_id = m.chat_session_id
+			WHERE b.installation_id = $1`, f.installationStr).
+			Scan(&messageID, &sessionID, &body, &attachments, &settled)
+		if err == nil && attachments == 1 && settled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("media never settled onto the ingested message: err=%v attachments=%d settled=%v",
+				err, attachments, settled)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	drainRouter(t, r)
+
+	if body != "[图片]" {
+		t.Errorf("durable body = %q, want the placeholder", body)
+	}
+	if strings.Contains(body, "a.png") || strings.Contains(body, "topsecret") {
+		t.Errorf("durable body leaks the signed media url: %q", body)
+	}
+
+	// The attachment landed on the chat message, pointing at the storage
+	// object — not the platform url.
+	var attURL, filename, contentType string
+	f.fx.QueryRow(t, `
+		SELECT url, filename, content_type FROM attachment
+		WHERE workspace_id = $1 AND chat_message_id = $2`,
+		f.workspaceIDStr, messageID).Scan(&attURL, &filename, &contentType)
+	if !strings.HasPrefix(attURL, "https://store.test/workspaces/") {
+		t.Errorf("attachment url = %q, want the storage object url", attURL)
+	}
+	if strings.Contains(attURL, "topsecret") {
+		t.Errorf("attachment url carries the platform signature: %q", attURL)
+	}
+	if filename != "tuitui-image-1.png" || contentType != "image/png" {
+		t.Errorf("attachment name/type = %q/%q", filename, contentType)
+	}
+
+	// The bind transaction claims (removes) the intent it consumed: commit
+	// landed ⇔ intents gone.
+	if got := f.fx.Count(t, `
+		SELECT count(*) FROM channel_media_pending_object WHERE installation_id = $1`,
+		f.installationStr); got != 0 {
+		t.Errorf("leftover intent rows = %d, want 0 after a successful bind", got)
+	}
+	// The media-pending deadline cleared, so the deferred run could promote.
+	if got := f.fx.Count(t, `
+		SELECT count(*) FROM chat_message WHERE id = $1 AND channel_media_pending_until IS NOT NULL`,
+		messageID); got != 0 {
+		t.Errorf("media-pending deadline still set after bind: %d row(s)", got)
+	}
+	if calls := tasks.recorded(); len(calls) != 1 || calls[0].sessionID != mustRouteUUID(t, sessionID) {
+		t.Errorf("run enqueues = %+v, want exactly one for session %s", calls, sessionID)
 	}
 }
 

@@ -3,8 +3,9 @@ package tuitui
 // resolvers_test.go — the non-DB half of the resolver layer: the reverse
 // parse matrix for composite teams ids, the durable (chat_type, chat id)
 // → payload-kind derivation the outbound paths share, the ResolverSet
-// shape the engine.Router requires (nil Media / Typing included), and the
-// replier's per-conversation send shapes driven through a fake platform row.
+// shape the engine.Router requires (Media carried through, Typing pinned
+// nil), and the replier's per-conversation send shapes driven through a
+// fake platform row.
 
 import (
 	"context"
@@ -70,16 +71,35 @@ func TestTuituiSplitTeamsChatIDMatrix(t *testing.T) {
 	}
 }
 
+// stubMediaResolver only proves the constructor carries the slot through.
+type stubMediaResolver struct{}
+
+func (stubMediaResolver) HasMedia(channel.InboundMessage) bool { return false }
+
+func (stubMediaResolver) ResolveMedia(context.Context, engine.ResolvedInstallation, engine.ResolvedIdentity, pgtype.UUID, pgtype.UUID, channel.InboundMessage) channel.InboundMessage {
+	panic("tuitui resolvers test: ResolveMedia is not exercised here")
+}
+
 func TestTuituiResolverSetMeetsRouterRegistrationRequirements(t *testing.T) {
-	set := NewTuituiResolverSet(nil, nil, nil)
+	media := stubMediaResolver{}
+	set := NewTuituiResolverSet(nil, nil, nil, media)
 	if set.Installation == nil || set.Identity == nil || set.Dedup == nil ||
 		set.Session == nil || set.Audit == nil {
 		t.Fatalf("incomplete set would be silently dropped by Router.Register: %+v", set)
 	}
-	// Deliberate gaps, pinned so a future edit notices them:
-	if set.Media != nil {
-		t.Errorf("Media must stay nil until inbound emits MediaRefs")
+	// The Media slot carries exactly what the wiring handed in — a nil
+	// passed here (no storage backend) must remain an untyped nil so the
+	// Router's nil check disables media resolution rather than calling a
+	// typed-nil.
+	if set.Media != engine.MediaResolver(media) {
+		t.Errorf("Media = %v, want the resolver passed in", set.Media)
 	}
+	if bare := NewTuituiResolverSet(nil, nil, nil, nil); bare.Media != nil {
+		t.Errorf("Media = %v, want nil when no resolver was supplied", bare.Media)
+	}
+	// Deliberate gap, pinned so a future edit notices it: the platform
+	// protocol has no typing capability (see NewTuituiResolverSet), so the
+	// slot must stay an untyped nil.
 	if set.Typing != nil {
 		t.Errorf("Typing must stay nil (typed-nil guard): %v", set.Typing)
 	}

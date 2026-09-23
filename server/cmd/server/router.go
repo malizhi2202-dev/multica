@@ -919,9 +919,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// single-use token embedded in its redeem link, redeemed by the
 		// public /api/tuitui/binding/redeem endpoint below) plus the status /
 		// command notices. The chat-done subscriber in NewOutbound carries
-		// the agent's own replies. Media and typing stay unwired: inbound
-		// keeps media urls in Text/Raw and emits no MediaRefs, and the
-		// platform has no per-session indicator lifecycle to clear.
+		// the agent's own replies. Inbound media resolves through the shared
+		// attachment pipeline — the resolver is built only when a storage
+		// backend exists (without one the Router keeps media on the plain
+		// ingest path with the placeholder text durable). Typing stays
+		// unwired: the platform protocol has no typing capability at all, as
+		// the reference-implementation evidence in tuitui/resolvers.go
+		// records.
 		tuituiBindingSvc := tuitui.NewBindingTokenService(queries, pool)
 		h.TuituiBindingTokens = tuituiBindingSvc
 		tuituiReplier := tuitui.NewOutboundReplier(tuitui.OutboundReplierConfig{
@@ -934,7 +938,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			AppURL: appURLFromEnv(),
 			Logger: slog.Default(),
 		})
-		channelRouter.Register(tuitui.TypeTuitui, tuitui.NewTuituiResolverSet(queries, pool, tuituiReplier))
+		var tuituiMedia engine.MediaResolver
+		if store != nil {
+			tuituiMedia = tuitui.NewMediaResolver(store, engine.NewDBMediaIntentLedger(queries), slog.Default())
+		}
+		channelRouter.Register(tuitui.TypeTuitui, tuitui.NewTuituiResolverSet(queries, pool, tuituiReplier, tuituiMedia))
 		tuitui.NewOutbound(queries, box.Open, slog.Default()).Register(bus)
 		tuitui.RegisterTuitui(channelRegistry, tuitui.ChannelDeps{
 			Decrypt: box.Open,

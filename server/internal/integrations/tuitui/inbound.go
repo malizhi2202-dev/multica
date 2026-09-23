@@ -337,14 +337,17 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 		msg.AddressedToBot = true
 		msg.Text = payload.Content
 		msg.CommandText = payload.Content
-		// Teams media lives in images[]/files[] objects; keep the urls in Raw
-		// (the engine MediaResolver owns MediaRefs) and mirror the reference
-		// placeholder text so the agent sees that attachments exist.
+		// Teams media lives in images[]/files[] objects. The urls stay in the
+		// Raw envelope for the engine MediaResolver (media.go) to download
+		// after the message is durable; Text carries only the kind-marker
+		// placeholder, so the bound attachment link never appears twice in
+		// the body (the same placeholder-without-url split lark / wecom /
+		// slack persist for their attachments).
 		for _, img := range payload.Images {
 			if img.URL == "" {
 				continue
 			}
-			msg.Text += "\n[图片] " + img.URL
+			msg.Text += "\n[图片]"
 		}
 		for _, f := range payload.Files {
 			if f.URL == "" {
@@ -354,7 +357,7 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 			if name == "" {
 				name = "unknown"
 			}
-			msg.Text += fmt.Sprintf("\n[文件] %s : %s", name, f.URL)
+			msg.Text += "\n[文件] " + name
 		}
 		if msg.Text == "" {
 			// Contentless post with no media: nothing to ingest.
@@ -383,9 +386,15 @@ func normalizeEvent(frame *wsFrame, appID string) (normalizedInbound, bool) {
 }
 
 // flattenChatMessage maps the plain-chat msg_type union (reference
-// _parse_msg_body) onto the normalized text + MsgType. MediaRefs stay empty:
-// tuitui hands out directly-fetchable urls that the engine MediaResolver (a
-// follow-up wiring) consumes from Raw.
+// _parse_msg_body) onto the normalized text + MsgType. The reference client
+// interpolates the raw media urls into its text because it has no attachment
+// pipeline; this adapter keeps the urls in the Raw envelope only, where the
+// engine MediaResolver (media.go) resolves them into MediaRefs after the
+// message is durable, and emits just the kind-marker placeholder in Text —
+// the same placeholder-without-url split lark / wecom / slack persist, so a
+// bound attachment never doubles a bare link in the body. MediaRefs itself
+// stays empty: the core documents it as the resolver's output, never an
+// adapter input.
 func flattenChatMessage(p *eventPayload, msg *channel.InboundMessage) {
 	switch p.MsgType {
 	case "text", "":
@@ -394,50 +403,40 @@ func flattenChatMessage(p *eventPayload, msg *channel.InboundMessage) {
 		urls := collectURLs(p.Images)
 		t := p.Text
 		if len(urls) > 0 && strings.TrimSpace(t) == "" {
-			t = strings.Repeat("[图片]\n", len(urls)-1) + "[图片]"
-		}
-		for _, u := range urls {
-			t += "\n[图片] " + u
+			t = markerLines("[图片]", len(urls))
 		}
 		msg.Text = t
 	case "image":
 		msg.Type = channel.MsgTypeImage
-		var parts []string
-		for _, u := range collectURLs(p.Images) {
-			parts = append(parts, "[图片] "+u)
+		if urls := collectURLs(p.Images); len(urls) > 0 {
+			msg.Text = markerLines("[图片]", len(urls))
 		}
-		msg.Text = strings.Join(parts, "\n")
 	case "voice":
 		msg.Type = channel.MsgTypeAudio
-		if p.Voice != "" {
-			msg.Text = "[语音] " + p.Voice
-		} else {
-			msg.Text = "[语音]"
-		}
+		msg.Text = "[语音]"
 	case "video":
 		msg.Type = channel.MsgTypeVideo
-		if p.Video != "" {
-			msg.Text = "[视频] " + p.Video
-		} else {
-			msg.Text = "[视频]"
-		}
+		msg.Text = "[视频]"
 	case "file":
 		msg.Type = channel.MsgTypeFile
 		name := p.File.Name
 		if name == "" {
 			name = "unknown"
 		}
-		if p.File.URL != "" {
-			msg.Text = fmt.Sprintf("[文件] %s : %s", name, p.File.URL)
-		} else {
-			msg.Text = "[文件] " + name
-		}
+		msg.Text = "[文件] " + name
 	case "link":
 		msg.Text = fmt.Sprintf("[网页链接]\n%s\n%s", p.Link.Title, p.Link.URL)
 	default:
 		msg.Text = p.Text
 	}
 	msg.CommandText = msg.Text
+}
+
+// markerLines repeats one media placeholder on its own line per attachment,
+// so the durable body still shows the attachment count the reference
+// client's "[图片]" fallback showed.
+func markerLines(marker string, n int) string {
+	return strings.Repeat(marker+"\n", n-1) + marker
 }
 
 func collectURLs(parts []flexPart) []string {

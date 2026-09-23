@@ -161,25 +161,164 @@ func TestNormalizeDropsWithoutPlatformID(t *testing.T) {
 }
 
 func TestNormalizeMediaPlaceholders(t *testing.T) {
-	f := frameJSON(t, "single_chat", `{"msgid":"m","msg_type":"image","images":["u1","u2"]}`)
+	cases := []struct {
+		name  string
+		event string
+		data  string
+		// wantText is the exact durable body; no case may carry a media url.
+		wantText string
+		// wantSources are the download instructions the MediaResolver reads
+		// back out of Raw, in platform order.
+		wantSources []tuituiMediaSource
+		wantType    channel.MsgType
+	}{
+		{
+			name:     "only text",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"text","text":"plain"}`,
+			wantText: "plain", wantType: channel.MsgTypeText,
+		},
+		{
+			name:     "multiple images",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"image","images":["u1","u2"]}`,
+			wantText: "[图片]\n[图片]", wantType: channel.MsgTypeImage,
+			wantSources: []tuituiMediaSource{
+				{URL: "u1", Kind: channel.MsgTypeImage},
+				{URL: "u2", Kind: channel.MsgTypeImage},
+			},
+		},
+		{
+			name:     "image url keeps its signature query string",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"image","images":["https://media.test/a.png?sig=topsecret&t=2"]}`,
+			wantText: "[图片]", wantType: channel.MsgTypeImage,
+			wantSources: []tuituiMediaSource{
+				{URL: "https://media.test/a.png?sig=topsecret&t=2", Kind: channel.MsgTypeImage},
+			},
+		},
+		{
+			name:     "mixed with text keeps the text alone and still carries media",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"mixed","text":"看图","images":["u1"]}`,
+			wantText: "看图", wantType: channel.MsgTypeText,
+			wantSources: []tuituiMediaSource{{URL: "u1", Kind: channel.MsgTypeImage}},
+		},
+		{
+			name:     "malformed image entries without a url are skipped",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"image","images":["",{"name":"no-url"},"u3"]}`,
+			wantText: "[图片]", wantType: channel.MsgTypeImage,
+			wantSources: []tuituiMediaSource{{URL: "u3", Kind: channel.MsgTypeImage}},
+		},
+		{
+			name:     "voice and video carry one url each",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"video","video":"https://media.test/v.mp4?sig=x"}`,
+			wantText: "[视频]", wantType: channel.MsgTypeVideo,
+			wantSources: []tuituiMediaSource{{URL: "https://media.test/v.mp4?sig=x", Kind: channel.MsgTypeVideo}},
+		},
+		{
+			name:     "file names the attachment without the url",
+			event:    eventSingleChat,
+			data:     `{"msgid":"m","msg_type":"file","file":{"url":"https://media.test/f.bin?sig=y","name":"report.bin"}}`,
+			wantText: "[文件] report.bin", wantType: channel.MsgTypeFile,
+			wantSources: []tuituiMediaSource{{URL: "https://media.test/f.bin?sig=y", Kind: channel.MsgTypeFile, Filename: "report.bin"}},
+		},
+		{
+			name:  "teams post mixes images and files in order",
+			event: eventTeamsPostCreate,
+			data: `{"team_id":"t","channel_id":"c","post_id":"p","content":"look",` +
+				`"images":[{"url":"i1","name":"pic.png"},{"name":"malformed-no-url"},"str-item"],` +
+				`"files":[{"url":"f1"},{"url":""}]}`,
+			wantText: "look\n[图片]\n[图片]\n[文件] unknown", wantType: channel.MsgTypeText,
+			wantSources: []tuituiMediaSource{
+				{URL: "i1", Kind: channel.MsgTypeImage, Filename: "pic.png"},
+				{URL: "str-item", Kind: channel.MsgTypeImage},
+				{URL: "f1", Kind: channel.MsgTypeFile},
+			},
+		},
+		{
+			name:     "teams contentless post with media keeps a placeholder",
+			event:    eventTeamsPostCreate,
+			data:     `{"team_id":"t","channel_id":"c","post_id":"p","content":"","images":[{"url":"i1"}]}`,
+			wantText: "\n[图片]", wantType: channel.MsgTypeText,
+			wantSources: []tuituiMediaSource{{URL: "i1", Kind: channel.MsgTypeImage}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := frameJSON(t, tc.event, tc.data)
+			n, ok := normalizeEvent(f, "app-1")
+			if !ok {
+				t.Fatalf("frame should normalize: %s", tc.data)
+			}
+			msg := n.msg
+			if msg.Text != tc.wantText {
+				t.Errorf("Text = %q, want %q", msg.Text, tc.wantText)
+			}
+			if msg.Type != tc.wantType {
+				t.Errorf("Type = %v, want %v", msg.Type, tc.wantType)
+			}
+			// The core invariant: MediaRefs is the resolver's output, never
+			// adapter-populated at normalization time.
+			if len(msg.MediaRefs) != 0 {
+				t.Errorf("MediaRefs = %+v, want empty at normalize time", msg.MediaRefs)
+			}
+			// The download instructions must survive verbatim in Raw — this is
+			// exactly what engine.MediaResolver resolves after the message is
+			// durable.
+			got := tuituiMediaSources(msg)
+			if len(got) != len(tc.wantSources) {
+				t.Fatalf("media sources = %+v, want %+v", got, tc.wantSources)
+			}
+			for i := range got {
+				if got[i] != tc.wantSources[i] {
+					t.Errorf("source %d = %+v, want %+v", i, got[i], tc.wantSources[i])
+				}
+			}
+			// No raw media url may appear in the durable body, or the bound
+			// attachment would double it there.
+			for _, s := range tc.wantSources {
+				if s.URL != "" && strings.Contains(msg.Text, s.URL) {
+					t.Errorf("Text %q leaks media url %q", msg.Text, s.URL)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeMediaOnlyDegradesWithoutURLs(t *testing.T) {
+	// Malformed entries only: the message still normalizes (it was addressed
+	// text-less media), but nothing is downloadable.
+	f := frameJSON(t, eventSingleChat, `{"msgid":"m","msg_type":"image","images":[{"name":"x"}]}`)
 	n, ok := normalizeEvent(f, "app-1")
 	if !ok {
-		t.Fatal("image should normalize")
+		t.Fatal("image frame with malformed entries should still normalize")
 	}
-	if n.msg.Type != channel.MsgTypeImage {
-		t.Errorf("Type = %v", n.msg.Type)
-	}
-	if !strings.Contains(n.msg.Text, "[图片] u1") || !strings.Contains(n.msg.Text, "[图片] u2") {
-		t.Errorf("Text = %q", n.msg.Text)
-	}
-	if len(n.msg.MediaRefs) != 0 {
-		t.Error("adapters must not pre-populate MediaRefs")
+	if len(tuituiMediaSources(n.msg)) != 0 {
+		t.Errorf("sources = %+v, want none", tuituiMediaSources(n.msg))
 	}
 
-	f = frameJSON(t, "single_chat", `{"msgid":"m2","msg_type":"file","file":{"url":"u3","name":"a.bin"}}`)
-	n, _ = normalizeEvent(f, "app-1")
-	if n.msg.Type != channel.MsgTypeFile || !strings.Contains(n.msg.Text, "a.bin") {
-		t.Errorf("file mapping = %v %q", n.msg.Type, n.msg.Text)
+	// A voice msg_type whose url is empty keeps the reference's bare
+	// placeholder but offers the resolver nothing.
+	f = frameJSON(t, eventSingleChat, `{"msgid":"m2","msg_type":"voice","voice":""}`)
+	n, ok = normalizeEvent(f, "app-1")
+	if !ok || n.msg.Text != "[语音]" || len(tuituiMediaSources(n.msg)) != 0 {
+		t.Errorf("empty voice = %+v ok=%v", n.msg, ok)
+	}
+}
+
+func TestNormalizeDropsFrameWithoutMsgData(t *testing.T) {
+	// A frame with no data payload has no platform message id: hard drop
+	// (dedup keys on it), never a uuid-minted phantom like the reference.
+	raw := `{"event_id":"ev-1","body":{"event":"single_chat","user_account":"alice","user_name":"Alice"}}`
+	var f wsFrame
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	if _, ok := normalizeEvent(&f, "app-1"); ok {
+		t.Fatal("frame without msg_data must be dropped")
 	}
 }
 

@@ -28,13 +28,20 @@ const originTuituiChat = "tuitui_chat"
 // NewTuituiResolverSet assembles the Tuitui ResolverSet over the generated
 // queries + a tx starter (for the shared session service). The replier
 // delivers the outbound binding-prompt / status / issue-created notices;
-// pass a nil engine.OutboundReplier to disable them. Typing is not wired:
-// the platform has emoji reactions but no per-session indicator lifecycle to
-// clear on a run that produced no task, so the slot stays nil (the Router
-// treats nil as "disabled", never as a typed-nil). Media is likewise nil:
-// inbound keeps media urls in Text/Raw and emits no MediaRefs, so there is
-// nothing for a MediaResolver to resolve yet.
-func NewTuituiResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.OutboundReplier) engine.ResolverSet {
+// pass a nil engine.OutboundReplier to disable them. media is the adapter's
+// engine.MediaResolver (media.go); the wiring passes nil exactly when no
+// object-storage backend exists — the Router then keeps every inbound on
+// the plain ingest path with the placeholder text durable. Typing stays
+// nil, and that is a protocol fact rather than a gap: the authoritative
+// reference implementation (the reference bridge client,
+// tuitui_client.py — its whole TuituiClient surface, lines 63-645: the WS
+// receive loop plus every HTTP call through _api_request, send_message /
+// send_card / send_media / reactions) exposes no typing / "is-inputting"
+// endpoint, and no such capability appears anywhere in the file's protocol
+// vocabulary. There is nothing to declare, and inventing a fake indicator
+// the platform can never clear would stick it on every session; the Router
+// treats a nil slot as "disabled", never as a typed-nil.
+func NewTuituiResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.OutboundReplier, media engine.MediaResolver) engine.ResolverSet {
 	return engine.ResolverSet{
 		Installation: &installationResolver{q: q},
 		Identity:     &identityResolver{q: q},
@@ -44,6 +51,7 @@ func NewTuituiResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.Out
 			Direct:   "Tuitui direct message",
 			Fallback: "Tuitui chat",
 		})},
+		Media:      media,
 		Audit:      &auditor{q: q},
 		Replier:    replier,
 		OriginType: originTuituiChat,
@@ -55,6 +63,7 @@ var (
 	_ engine.IdentityResolver     = (*identityResolver)(nil)
 	_ engine.Deduper              = (*deduper)(nil)
 	_ engine.SessionBinder        = (*sessionBinder)(nil)
+	_ engine.MediaResolver        = (*mediaResolver)(nil)
 	_ engine.Auditor              = (*auditor)(nil)
 )
 
