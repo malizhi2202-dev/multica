@@ -86,8 +86,12 @@ func TestTuituiResolverSetMeetsRouterRegistrationRequirements(t *testing.T) {
 	if set.Replier != nil {
 		t.Errorf("Replier = %v, want nil disabled", set.Replier)
 	}
-	if set.OriginType != "" {
-		t.Errorf("OriginType = %q, want empty while issue.origin_type lacks the label", set.OriginType)
+	// Stamped on every issue a Tuitui /issue command creates. The literal is
+	// deliberate: it is the analytics key and the value migration 510/511
+	// added to issue.origin_type's CHECK, so renaming the label here must fail
+	// loudly rather than follow the constant.
+	if set.OriginType != "tuitui_chat" {
+		t.Errorf("OriginType = %q, want tuitui_chat", set.OriginType)
 	}
 }
 

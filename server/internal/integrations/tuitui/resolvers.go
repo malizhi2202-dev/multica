@@ -18,14 +18,12 @@ import (
 // channel-agnostic engine.Router runs the inbound pipeline through. It is
 // built entirely on the generic channel_* queries plus the shared
 // engine.ChatSession, mirroring the DingTalk / Slack / WeCom ResolverSets.
-//
-// OriginType stays empty on purpose: the live issue.origin_type CHECK lists
-// the channel origins added so far but not 'tuitui_chat', and this change
-// ships no migration. A /issue typed in a Tuitui chat therefore creates the
-// issue with a NULL origin (IssueService skips the origin columns when
-// OriginType is ""), which is honest rather than a mislabeled origin.
-// Stamping it is a one-line change plus the standard widen-CHECK migration
-// pair (the 366/367 pattern).
+
+// originTuituiChat is the issue.origin_type label for issues created through
+// Tuitui's /issue command. The shared channel Router stamps it together with
+// origin_id=<chat_session.id>, the same semantics the other channel origins
+// carry (lark_chat / slack_chat / dingtalk_chat / wecom_chat / telegram_chat).
+const originTuituiChat = "tuitui_chat"
 
 // NewTuituiResolverSet assembles the Tuitui ResolverSet over the generated
 // queries + a tx starter (for the shared session service). The replier
@@ -48,7 +46,7 @@ func NewTuituiResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.Out
 		})},
 		Audit:      &auditor{q: q},
 		Replier:    replier,
-		OriginType: "",
+		OriginType: originTuituiChat,
 	}
 }
 

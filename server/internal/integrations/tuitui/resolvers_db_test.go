@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -252,6 +253,19 @@ func (f *tuituiRouteFixture) replier() *OutboundReplier {
 func (f *tuituiRouteFixture) router(replier engine.OutboundReplier, tasks *fakeTaskEnqueuer) *engine.Router {
 	r := engine.NewRouter(fakeIssueCreator{}, tasks, f.q, engine.RouterConfig{Logger: testDiscardLogger()})
 	r.Register(TypeTuitui, NewTuituiResolverSet(f.q, f.pool, replier))
+	return r
+}
+
+// issueRouter is router() with the real IssueService in place of the fake, so
+// an /issue command writes a real issue row and the test can ask the database
+// what provenance that row carries. The outbound replier stays nil: this
+// suite reads the row, it does not assert the chat notice.
+func (f *tuituiRouteFixture) issueRouter(tasks *fakeTaskEnqueuer) *engine.Router {
+	bus := events.New()
+	issueService := service.NewIssueService(f.q, f.pool, bus, nil,
+		&service.TaskService{Queries: f.q, TxStarter: f.pool, Bus: bus})
+	r := engine.NewRouter(issueService, tasks, f.q, engine.RouterConfig{Logger: testDiscardLogger()})
+	r.Register(TypeTuitui, NewTuituiResolverSet(f.q, f.pool, nil))
 	return r
 }
 
@@ -600,5 +614,70 @@ func TestTuituiRouterAddressedGroupBindsGroupSession(t *testing.T) {
 		f.installationStr).Scan(&chatType, &chatID)
 	if chatType != "group" || chatID != "778899" {
 		t.Errorf("group binding = (%q, %q), want (group, 778899)", chatType, chatID)
+	}
+}
+
+// TestTuituiRouterIssueCommandStampsOrigin is the provenance assertion. The
+// issue a fully routed `/issue` command creates — real inbound frame, real
+// ResolverSet, real Router, real IssueService, real Postgres — carries
+// origin_type='tuitui_chat' plus origin_id=<the chat session it was typed
+// in>, the same stamp every other channel writes. Migrations 510/511 widened
+// the live issue.origin_type CHECK to admit the label; before that the write
+// failed SQLSTATE 23514, so the ResolverSet left OriginType empty and the
+// command filed unattributed issues.
+func TestTuituiRouterIssueCommandStampsOrigin(t *testing.T) {
+	f := newTuituiRouteFixture(t)
+	f.bindSender()
+	// The issue is written by the production create path, so the Fixture's
+	// per-row cleanup cannot reach it. agent_task_queue / comment / label rows
+	// hang off it by ON DELETE CASCADE, so this one delete clears the rest.
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(),
+			`DELETE FROM issue WHERE workspace_id = $1 AND origin_type = $2`,
+			f.workspaceID, originTuituiChat)
+	})
+
+	tasks := &fakeTaskEnqueuer{}
+	r := f.issueRouter(tasks)
+
+	msg := f.inbound(t, eventSingleChat, f.sender,
+		`{"msgid":"m-origin-1","msg_type":"text","text":"/issue Fix the login redirect"}`)
+	if err := r.Handle(context.Background(), msg); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	drainRouter(t, r)
+
+	var sessionID string
+	f.fx.QueryRow(t, `
+		SELECT chat_session_id::text FROM channel_chat_session_binding WHERE installation_id = $1`,
+		f.installationStr).Scan(&sessionID)
+
+	var originCount int
+	f.fx.QueryRow(t, `
+		SELECT count(*) FROM issue WHERE workspace_id = $1 AND origin_type = $2`,
+		f.workspaceIDStr, originTuituiChat).Scan(&originCount)
+	if originCount != 1 {
+		t.Fatalf("tuitui_chat issues = %d, want exactly 1", originCount)
+	}
+
+	var originID, title, creatorType, creatorID string
+	f.fx.QueryRow(t, `
+		SELECT origin_id::text, title, creator_type, creator_id::text
+		FROM issue WHERE workspace_id = $1 AND origin_type = $2`,
+		f.workspaceIDStr, originTuituiChat).
+		Scan(&originID, &title, &creatorType, &creatorID)
+	if originID != sessionID {
+		t.Errorf("origin_id = %q, want the session the command was typed in %q", originID, sessionID)
+	}
+	if title != "Fix the login redirect" {
+		t.Errorf("title = %q, want the parsed command title", title)
+	}
+	if creatorType != "member" || creatorID != f.userIDStr {
+		t.Errorf("creator = %s/%s, want member/%s (the sender, not the installer)", creatorType, creatorID, f.userIDStr)
+	}
+
+	// A terminal issue command must not also schedule a chat run.
+	if calls := tasks.recorded(); len(calls) != 0 {
+		t.Errorf("chat run enqueues = %d, want 0 for a terminal /issue command: %+v", len(calls), calls)
 	}
 }
