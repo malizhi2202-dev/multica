@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +43,13 @@ type TuituiInstallationResponse struct {
 	CreatedAt       string `json:"created_at"`
 	UpdatedAt       string `json:"updated_at"`
 	AgentAvailable  bool   `json:"agent_available"`
+	// Host / Port echo the effective Tuitui server this bot dials, so the
+	// user can confirm which server they connected. They resolve exactly what
+	// the adapter falls back to at connect time (config.go FromInstallConfig):
+	// a row stored without host/port — including every pre-address row and a
+	// bare host without port — echoes the platform defaults, not a 0/blank.
+	Host string `json:"host"`
+	Port int    `json:"port"`
 	// BoundTuituiUserIDs carries only the requesting member's own Tuitui
 	// accounts for this bot, never other members'.
 	BoundTuituiUserIDs []string `json:"bound_tuitui_user_ids,omitempty"`
@@ -87,7 +96,34 @@ const (
 	tuituiBotIdentityIssueNoLookup = "identity_lookup_unavailable"
 )
 
+// tuituiEffectiveServer reads the stored host/port keys back out of an
+// installation config so every response can echo the server the bot dials.
+// Unreadable or pre-address blobs resolve to the adapter's own defaults —
+// the same resolution FromInstallConfig performs at connect time, not a
+// second source of truth.
+func tuituiEffectiveServer(raw []byte) (string, int) {
+	host, port := "", 0
+	var stored struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	}
+	// A torn or legacy blob simply falls through to the defaults; the echo
+	// must never fail a listing.
+	if err := json.Unmarshal(raw, &stored); err == nil {
+		host = strings.TrimSpace(stored.Host)
+		port = stored.Port
+	}
+	if host == "" {
+		host = tuitui.DefaultHost
+	}
+	if port < 1 || port > 65535 {
+		port = tuitui.DefaultPort
+	}
+	return host, port
+}
+
 func tuituiInstallationToResponse(row db.ChannelInstallation) TuituiInstallationResponse {
+	host, port := tuituiEffectiveServer(row.Config)
 	return TuituiInstallationResponse{
 		ID:              uuidToString(row.ID),
 		WorkspaceID:     uuidToString(row.WorkspaceID),
@@ -98,6 +134,8 @@ func tuituiInstallationToResponse(row db.ChannelInstallation) TuituiInstallation
 		CreatedAt:       row.CreatedAt.Time.UTC().Format(time.RFC3339),
 		UpdatedAt:       row.UpdatedAt.Time.UTC().Format(time.RFC3339),
 		AgentAvailable:  true,
+		Host:            host,
+		Port:            port,
 	}
 }
 
@@ -429,11 +467,102 @@ func (h *Handler) ForgetTuituiGroup(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// RegisterTuituiBYORequest is the body for a bring-your-own-app install: the two
-// credentials the user pasted from their own Tuitui robot application.
+// RegisterTuituiBYORequest is the body for a bring-your-own-app install: the
+// address of the Tuitui server to connect to plus the two credentials the user
+// pasted from their own Tuitui robot application.
 type RegisterTuituiBYORequest struct {
+	// BaseURL is the Tuitui server Multica must connect to: "https://host:port",
+	// "wss://host", or a bare "host[:port]". The Tuitui WSS callback and HTTPS
+	// API share one host:port (see integrations/tuitui/config.go), so the
+	// dialog collects a single address instead of two duplicate fields; this
+	// handler resolves it into the host + port pair stored under
+	// config->>'host' / config->>'port'. The scheme is only used to interpret
+	// the input — the adapter builds the wss/https URLs itself.
+	BaseURL   string `json:"base_url"`
 	AppID     string `json:"app_id"`
 	AppSecret string `json:"app_secret"`
+}
+
+// tuituiServerAddressSchemes are the only schemes accepted for the BYO server
+// address; anything else is a typo or a different protocol.
+var tuituiServerAddressSchemes = map[string]struct{}{
+	"http": {}, "https": {}, "ws": {}, "wss": {},
+}
+
+// parseTuituiServerAddress resolves the single "server address" field the BYO
+// dialog collects into the host + port pair the adapter stores. Accepted forms:
+// "https://host:port", "wss://host", or a bare "host:port" / "host". The
+// Tuitui WSS callback and HTTPS API share one host:port (see
+// integrations/tuitui/config.go), so a path, query, fragment, or userinfo is
+// rejected — the address is host and optional port only; the adapter composes
+// the fixed API/callback paths. One exception normalizes away: a single
+// trailing "/" ("https://host:8282/") carries no information and is what
+// browsers and ops docs paste; anything slash-beyond-it ("//", "/a/") is path
+// semantics and stays refused. A bare host without a port returns port 0 so
+// the adapter applies its own DefaultPort; the handler must not encode that
+// default here.
+func parseTuituiServerAddress(raw string) (host string, port int, err error) {
+	address := strings.TrimSpace(raw)
+	if address == "" {
+		return "", 0, errors.New(
+			"server address is required — enter the Tuitui server to connect to, e.g. https://tuitui.internal:8282")
+	}
+	if !strings.Contains(address, "://") {
+		// Bare authority. url.Parse would read "host:8282" as scheme "host",
+		// so anything path/query/fragment-shaped is refused outright and the
+		// rest is parsed under a placeholder scheme for uniform extraction.
+		if strings.ContainsAny(address, "/?#\\") {
+			return "", 0, fmt.Errorf(
+				"invalid server address %q — give only the host and optional port, e.g. tuitui.internal:8282", address)
+		}
+		address = "https://" + address
+	}
+	u, parseErr := url.Parse(address)
+	if parseErr != nil {
+		return "", 0, fmt.Errorf("invalid server address: %v", parseErr)
+	}
+	if _, ok := tuituiServerAddressSchemes[strings.ToLower(u.Scheme)]; !ok {
+		return "", 0, fmt.Errorf(
+			"unsupported scheme %q in server address — use http, https, ws or wss, or just host:port", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", 0, errors.New("invalid server address: the host is missing")
+	}
+	// A single trailing slash is normalized away — it carries no path
+	// information; anything beyond that ("//", "/a/") is path semantics and
+	// stays 400.
+	if u.Path != "" && u.Path != "/" {
+		return "", 0, fmt.Errorf(
+			"invalid server address: a path is not allowed (the server is dialed on fixed paths) — remove %q", u.Path)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return "", 0, errors.New("invalid server address: a query string is not allowed")
+	}
+	if u.Fragment != "" {
+		return "", 0, errors.New("invalid server address: a fragment is not allowed")
+	}
+	if u.User != nil {
+		return "", 0, errors.New(
+			"invalid server address: username/password in the address are not allowed — credentials belong in the AppID and AppSecret fields")
+	}
+	host = u.Hostname()
+	if host == "" {
+		return "", 0, errors.New("invalid server address: the host is missing")
+	}
+	if p := u.Port(); p != "" {
+		n, convErr := strconv.Atoi(p)
+		if convErr != nil || n < 1 || n > 65535 {
+			return "", 0, fmt.Errorf("invalid server address: port %q is not between 1 and 65535", p)
+		}
+		port = n
+	}
+	// url.Parse strips the brackets every consumer (the wss dial string, the
+	// https host:port) requires around an IPv6 literal; put them back so the
+	// adapter's "wss://{host}:{port}" composition stays dialable.
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return host, port, nil
 }
 
 // RegisterTuituiBYO (POST /api/workspaces/{id}/tuitui/install/byo?agent_id=…)
@@ -487,16 +616,27 @@ func (h *Handler) RegisterTuituiBYO(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// Resolve the single server-address field at the boundary: a bad or missing
+	// address is a 400 the dialog can show, never a silent fallback to the
+	// public cloud default and never a 500.
+	host, port, addrErr := parseTuituiServerAddress(body.BaseURL)
+	if addrErr != nil {
+		writeError(w, http.StatusBadRequest, addrErr.Error())
+		return
+	}
 	row, err := h.TuituiInstall.RegisterBYO(r.Context(), tuitui.RegisterBYOParams{
 		WorkspaceID: wsUUID,
 		AgentID:     agentUUID,
 		InitiatorID: initiatorUUID,
+		Host:        host,
+		Port:        port,
 		AppID:       body.AppID,
 		AppSecret:   body.AppSecret,
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, tuitui.ErrInvalidAppID), errors.Is(err, tuitui.ErrInvalidAppSecret):
+		case errors.Is(err, tuitui.ErrInvalidAppID), errors.Is(err, tuitui.ErrInvalidAppSecret),
+			errors.Is(err, tuitui.ErrInvalidHost):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, tuitui.ErrAppOwnedBySameWorkspace):
 			writeError(w, http.StatusConflict, "this Tuitui app is already connected to another agent in this workspace — disconnect it there first, then connect it here")

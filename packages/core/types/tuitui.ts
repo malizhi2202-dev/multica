@@ -20,6 +20,14 @@ export interface TuituiInstallation {
   /** False only when a workspace admin is viewing an orphaned installation
    * whose Agent no longer exists. Optional for older backends. */
   agent_available?: boolean;
+  /** Effective Tuitui server host this bot dials — the normalized host the
+   * BYO dialog's single "server address" field resolved to (an IPv6 literal
+   * keeps its brackets). Echoed so the user can confirm which server they
+   * connected. Optional for older backends, which never sent it. */
+  host?: string;
+  /** Effective port behind `host`, with the adapter's default already applied
+   * server-side. Optional for older backends. */
+  port?: number;
   /** Tuitui user ids linked by the currently authenticated Multica user for
    * this bot. Member-scoped so the member-visible installation endpoint does
    * not disclose other members' Tuitui identities. */
@@ -85,11 +93,16 @@ export interface ListTuituiGroupsParams {
   limit?: number;
 }
 
-/** Request body for a bring-your-own-app (BYO) install: the app_id and
- * app_secret of the Tuitui robot application the operator created. The
- * backend validates both before persisting, then returns the created
- * TuituiInstallation. */
+/** Request body for a bring-your-own-app (BYO) install: the address of the
+ * Tuitui server Multica must connect to plus the app_id and app_secret of the
+ * Tuitui robot application the operator created. The backend resolves
+ * `base_url` into the stored host + port pair — a missing or unparsable
+ * address is a 400, never a silent fallback to the public cloud default —
+ * then validates both credentials before persisting, and returns the created
+ * TuituiInstallation with the effective host/port echoed. */
 export interface RegisterTuituiBYORequest {
+  /** "https://host:port", "wss://host", or a bare "host[:port]". Required. */
+  base_url: string;
   app_id: string;
   app_secret: string;
 }

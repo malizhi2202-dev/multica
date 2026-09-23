@@ -177,19 +177,22 @@ describe("TuituiTab", () => {
     expect(screen.queryByTestId("tuitui-add-installation")).toBeNull();
   });
 
-  it("blocks BYO submit until both credential fields are non-empty", async () => {
+  it("blocks BYO submit until the server address and both credentials are non-empty", async () => {
     renderUI(<TuituiTab />);
     await userEvent.click(screen.getByTestId("tuitui-add-installation"));
     await pickAgent("Aria");
     const submit = screen.getByTestId("tuitui-add-submit");
     expect(submit).toBeDisabled();
     await userEvent.type(screen.getByTestId("tuitui-byo-app-id"), "app-1");
+    await userEvent.type(screen.getByTestId("tuitui-byo-app-secret"), "secret-1");
+    // Credentials alone are not enough: an empty address must never fall
+    // through to the server's default target.
     expect(submit).toBeDisabled();
-    await userEvent.type(screen.getByTestId("tuitui-byo-app-secret"), "  ");
+    await userEvent.type(screen.getByTestId("tuitui-byo-base-url"), "  ");
     // Whitespace only: trimmed value is empty, still blocked.
     expect(submit).toBeDisabled();
-    await userEvent.clear(screen.getByTestId("tuitui-byo-app-secret"));
-    await userEvent.type(screen.getByTestId("tuitui-byo-app-secret"), "secret-1");
+    await userEvent.clear(screen.getByTestId("tuitui-byo-base-url"));
+    await userEvent.type(screen.getByTestId("tuitui-byo-base-url"), "https://tt.test:8443");
     await waitFor(() => expect(submit).toBeEnabled());
   });
 
@@ -198,12 +201,14 @@ describe("TuituiTab", () => {
     renderUI(<TuituiTab />);
     await userEvent.click(screen.getByTestId("tuitui-add-installation"));
     await pickAgent("Bolt");
+    await userEvent.type(screen.getByTestId("tuitui-byo-base-url"), "  https://tt.test:8443  ");
     await userEvent.type(screen.getByTestId("tuitui-byo-app-id"), "  app-7  ");
     await userEvent.type(screen.getByTestId("tuitui-byo-app-secret"), "sec-7");
     await userEvent.click(screen.getByTestId("tuitui-add-submit"));
     await waitFor(() =>
       expect(mutationsRef.register.mutateAsync).toHaveBeenCalledWith({
         agentId: "agent-7",
+        base_url: "https://tt.test:8443",
         app_id: "app-7",
         app_secret: "sec-7",
       }),
@@ -216,6 +221,7 @@ describe("TuituiTab", () => {
     renderUI(<TuituiTab />);
     await userEvent.click(screen.getByTestId("tuitui-add-installation"));
     await pickAgent("Aria");
+    await userEvent.type(screen.getByTestId("tuitui-byo-base-url"), "https://tt.test");
     await userEvent.type(screen.getByTestId("tuitui-byo-app-id"), "app-1");
     await userEvent.type(screen.getByTestId("tuitui-byo-app-secret"), "sec-1");
     await userEvent.click(screen.getByTestId("tuitui-add-submit"));
@@ -223,6 +229,36 @@ describe("TuituiTab", () => {
       expect(toastRef.error).toHaveBeenCalledWith("invalid credentials"),
     );
     expect(toastRef.success).not.toHaveBeenCalled();
+  });
+
+  it("shows a server address rejection inline beside the visible text address field", async () => {
+    mutationsRef.register.mutateAsync.mockRejectedValue(
+      new Error('invalid server address: a path is not allowed — remove "/robot"'),
+    );
+    renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-add-installation"));
+    await pickAgent("Aria");
+    const address = screen.getByTestId("tuitui-byo-base-url");
+    // The address is a hostname, not a secret: visible text input with the
+    // canonical scheme-bearing placeholder.
+    expect(address.getAttribute("type")).toBe("text");
+    expect(address.getAttribute("placeholder")).toBe("https://tuitui.internal:8282");
+    await userEvent.type(address, "https://tt.test/robot");
+    await userEvent.type(screen.getByTestId("tuitui-byo-app-id"), "app-1");
+    await userEvent.type(screen.getByTestId("tuitui-byo-app-secret"), "sec-1");
+    await userEvent.click(screen.getByTestId("tuitui-add-submit"));
+    const alert = await screen.findByTestId("tuitui-byo-error");
+    expect(alert).toHaveTextContent("a path is not allowed");
+    expect(address).toHaveAttribute("aria-invalid", "true");
+    // The dialog stays open so the user can fix the address and retry.
+    expect(screen.getByTestId("tuitui-add-submit")).toBeEnabled();
+    await userEvent.type(
+      screen.getByTestId("tuitui-byo-app-id"),
+      "x",
+    );
+    // Any field edit clears the stale rejection.
+    expect(screen.queryByTestId("tuitui-byo-error")).toBeNull();
+    expect(address).toHaveAttribute("aria-invalid", "false");
   });
 
   it("masks both credential inputs as password fields", async () => {

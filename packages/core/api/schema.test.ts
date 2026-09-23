@@ -863,6 +863,7 @@ describe("ApiClient schema fallback", () => {
       stubFetchJson({ id: "inst-9", status: "active" });
       const client = new ApiClient("https://api.example.test");
       await client.registerTuituiBYO("ws-1", "agent-1", {
+        base_url: "https://tuitui.internal:8282",
         app_id: "app-1",
         app_secret: "sec-1",
       });
@@ -870,13 +871,41 @@ describe("ApiClient schema fallback", () => {
         "https://api.example.test/api/workspaces/ws-1/tuitui/install/byo?agent_id=agent-1",
         expect.objectContaining({
           method: "POST",
-          body: JSON.stringify({ app_id: "app-1", app_secret: "sec-1" }),
+          body: JSON.stringify({
+            base_url: "https://tuitui.internal:8282",
+            app_id: "app-1",
+            app_secret: "sec-1",
+          }),
         }),
       );
 
+      // The response echoes the effective server the bot dials; a torn
+      // host/port must degrade to the fail-closed defaults, never throw.
+      stubFetchJson({ id: "inst-9", status: "active", host: "[::1]", port: 8282 });
+      await expect(
+        client.registerTuituiBYO("ws-1", "agent-1", {
+          base_url: "wss://[::1]",
+          app_id: "a",
+          app_secret: "b",
+        }),
+      ).resolves.toMatchObject({ id: "inst-9", host: "[::1]", port: 8282 });
+
+      stubFetchJson({ id: "inst-9", status: "active", host: 42, port: "not-a-number" });
+      await expect(
+        client.registerTuituiBYO("ws-1", "agent-1", {
+          base_url: "https://a",
+          app_id: "a",
+          app_secret: "b",
+        }),
+      ).resolves.toMatchObject({ id: "inst-9", host: "", port: 0 });
+
       stubFetchJson({ id: 123 });
       await expect(
-        client.registerTuituiBYO("ws-1", "agent-1", { app_id: "a", app_secret: "b" }),
+        client.registerTuituiBYO("ws-1", "agent-1", {
+          base_url: "https://a",
+          app_id: "a",
+          app_secret: "b",
+        }),
       ).resolves.toMatchObject({ id: "", status: "revoked" });
 
       vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));

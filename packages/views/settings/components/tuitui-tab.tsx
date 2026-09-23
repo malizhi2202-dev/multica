@@ -302,23 +302,77 @@ export function TuituiBotGroups({
   );
 }
 
-// TuituiByoFields is the credential pair shared by the Settings add dialog and
-// the agent-side Connect dialog. Inputs are masked like DingTalk's: these
-// values are secrets pasted out of the Tuitui app console.
+// TuituiByoFields is the connection form shared by the Settings add dialog and
+// the agent-side Connect dialog: the address of the Tuitui server to dial plus
+// the credential pair. The address is a plain visible input (it is a hostname,
+// not a secret, and mis-typing it connects the bot to the wrong server); the
+// credential inputs stay masked like DingTalk's — these values are secrets
+// pasted out of the Tuitui app console. base_url arrives verbatim at the API;
+// resolving it into host + port is the handler's single job, so no parsing or
+// defaulting happens here.
 function TuituiByoFields({
+  baseUrl,
   appId,
   appSecret,
   onChange,
   disabled,
+  error = "",
 }: {
+  baseUrl: string;
   appId: string;
   appSecret: string;
-  onChange: (next: { appId: string; appSecret: string }) => void;
+  onChange: (next: { baseUrl: string; appId: string; appSecret: string }) => void;
   disabled: boolean;
+  /** Server rejection (a 400 naming the exact violation), shown verbatim. */
+  error?: string;
 }) {
   const { t } = useT("settings");
   return (
     <>
+      <div className="space-y-1.5">
+        <Label
+          htmlFor="tuitui-byo-base-url"
+          className="text-caption text-muted-foreground"
+        >
+          {t(($) => $.tuitui.byo_baseurl_label)}
+        </Label>
+        <Input
+          id="tuitui-byo-base-url"
+          data-testid="tuitui-byo-base-url"
+          type="text"
+          value={baseUrl}
+          onChange={(e) => onChange({ baseUrl: e.target.value, appId, appSecret })}
+          // Literal, not a locale key: the example is an address, identical
+          // in every language. Scheme included on purpose — it is the
+          // canonical spelling the hint describes.
+          placeholder="https://tuitui.internal:8282"
+          autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          disabled={disabled}
+          aria-invalid={!!error}
+          aria-describedby={error ? "tuitui-byo-base-url-error" : undefined}
+        />
+        <p className="text-caption leading-relaxed text-muted-foreground">
+          {t(($) => $.tuitui.byo_baseurl_hint)}
+        </p>
+        {/* Inline error beside the address it concerns, rendered only when a
+            submit was rejected (required-ness itself is enforced by the
+            submit gate, never as a standalone error). The localized lead-in
+            frames the backend's precise violation, which is shown verbatim
+            because it names the exact reason to fix. */}
+        {error ? (
+          <p
+            id="tuitui-byo-base-url-error"
+            role="alert"
+            data-testid="tuitui-byo-error"
+            className="text-caption text-destructive"
+          >
+            {`${t(($) => $.tuitui.byo_baseurl_error)} ${error}`}
+          </p>
+        ) : null}
+      </div>
       <div className="space-y-1.5">
         <Label
           htmlFor="tuitui-byo-app-id"
@@ -331,7 +385,7 @@ function TuituiByoFields({
           data-testid="tuitui-byo-app-id"
           type="password"
           value={appId}
-          onChange={(e) => onChange({ appId: e.target.value, appSecret })}
+          onChange={(e) => onChange({ baseUrl, appId: e.target.value, appSecret })}
           autoComplete="off"
           spellCheck={false}
           disabled={disabled}
@@ -349,7 +403,7 @@ function TuituiByoFields({
           data-testid="tuitui-byo-app-secret"
           type="password"
           value={appSecret}
-          onChange={(e) => onChange({ appId, appSecret: e.target.value })}
+          onChange={(e) => onChange({ baseUrl, appId, appSecret: e.target.value })}
           autoComplete="off"
           spellCheck={false}
           disabled={disabled}
@@ -391,8 +445,10 @@ export function TuituiTab() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [addAgentId, setAddAgentId] = useState("");
+  const [addBaseUrl, setAddBaseUrl] = useState("");
   const [addAppId, setAddAppId] = useState("");
   const [addAppSecret, setAddAppSecret] = useState("");
+  const [addError, setAddError] = useState("");
   const registerBYO = useRegisterTuituiBYO(wsId);
   const { data: agents = [] } = useQuery({
     ...agentListOptions(wsId),
@@ -403,26 +459,34 @@ export function TuituiTab() {
     if (registerBYO.isPending) return;
     setAddOpen(false);
     setAddAgentId("");
+    setAddBaseUrl("");
     setAddAppId("");
     setAddAppSecret("");
+    setAddError("");
   }
 
   async function handleAddSubmit() {
     const agentId = addAgentId;
+    const base_url = addBaseUrl.trim();
     const app_id = addAppId.trim();
     const app_secret = addAppSecret.trim();
-    if (registerBYO.isPending || !agentId || !app_id || !app_secret) return;
+    // base_url is required like the credentials: an empty address must never
+    // fall through to a server-side default target.
+    if (registerBYO.isPending || !agentId || !base_url || !app_id || !app_secret) return;
     try {
-      await registerBYO.mutateAsync({ agentId, app_id, app_secret });
+      await registerBYO.mutateAsync({ agentId, base_url, app_id, app_secret });
       toast.success(t(($) => $.tuitui.byo_success_toast));
       setAddOpen(false);
       setAddAgentId("");
+      setAddBaseUrl("");
       setAddAppId("");
       setAddAppSecret("");
+      setAddError("");
     } catch (e) {
-      toast.error(
-        e instanceof Error ? e.message : t(($) => $.tuitui.byo_failed_toast),
-      );
+      const message =
+        e instanceof Error ? e.message : t(($) => $.tuitui.byo_failed_toast);
+      setAddError(message);
+      toast.error(message);
     }
   }
 
@@ -440,7 +504,10 @@ export function TuituiTab() {
   }
 
   const addCanSubmit =
-    !!addAgentId && addAppId.trim() !== "" && addAppSecret.trim() !== "";
+    !!addAgentId &&
+    addBaseUrl.trim() !== "" &&
+    addAppId.trim() !== "" &&
+    addAppSecret.trim() !== "";
 
   return (
     <div className="space-y-8">
@@ -546,11 +613,16 @@ export function TuituiTab() {
               </Select>
             </div>
             <TuituiByoFields
+              baseUrl={addBaseUrl}
               appId={addAppId}
               appSecret={addAppSecret}
-              onChange={({ appId, appSecret }) => {
+              error={addError}
+              onChange={({ baseUrl, appId, appSecret }) => {
+                setAddBaseUrl(baseUrl);
                 setAddAppId(appId);
                 setAddAppSecret(appSecret);
+                // The error described the previous submit attempt.
+                setAddError("");
               }}
               disabled={registerBYO.isPending}
             />
@@ -745,8 +817,10 @@ export function TuituiAgentBindButton({
   const tuituiSupported = useConfigStore((s) => s.tuituiSupported);
 
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [baseUrl, setBaseUrl] = useState("");
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
+  const [byoError, setByoError] = useState("");
   const registerBYO = useRegisterTuituiBYO(wsId);
 
   const { data: listing } = useQuery(tuituiInstallationsOptions(wsId));
@@ -786,29 +860,40 @@ export function TuituiAgentBindButton({
   function closeDialog() {
     if (registerBYO.isPending) return;
     setDialogOpen(false);
+    setBaseUrl("");
     setAppId("");
     setAppSecret("");
+    setByoError("");
   }
 
   async function handleSubmit() {
+    const base_url = baseUrl.trim();
     const app_id = appId.trim();
     const app_secret = appSecret.trim();
-    if (registerBYO.isPending || !agentId || !app_id || !app_secret) return;
+    // base_url is required like the credentials — never submit an install that
+    // would fall through to the server's default target.
+    if (registerBYO.isPending || !agentId || !base_url || !app_id || !app_secret) return;
     try {
-      await registerBYO.mutateAsync({ agentId, app_id, app_secret });
+      await registerBYO.mutateAsync({ agentId, base_url, app_id, app_secret });
       toast.success(t(($) => $.tuitui.byo_success_toast));
       setDialogOpen(false);
+      setBaseUrl("");
       setAppId("");
       setAppSecret("");
+      setByoError("");
     } catch (e) {
-      toast.error(
-        e instanceof Error ? e.message : t(($) => $.tuitui.byo_failed_toast),
-      );
+      const message =
+        e instanceof Error ? e.message : t(($) => $.tuitui.byo_failed_toast);
+      setByoError(message);
+      toast.error(message);
     }
   }
 
   const canSubmit =
-    appId.trim() !== "" && appSecret.trim() !== "" && !registerBYO.isPending;
+    baseUrl.trim() !== "" &&
+    appId.trim() !== "" &&
+    appSecret.trim() !== "" &&
+    !registerBYO.isPending;
 
   return (
     <div
@@ -847,11 +932,16 @@ export function TuituiAgentBindButton({
 
           <div className="space-y-4 p-5">
             <TuituiByoFields
+              baseUrl={baseUrl}
               appId={appId}
               appSecret={appSecret}
-              onChange={({ appId: nextId, appSecret: nextSecret }) => {
+              error={byoError}
+              onChange={({ baseUrl: nextUrl, appId: nextId, appSecret: nextSecret }) => {
+                setBaseUrl(nextUrl);
                 setAppId(nextId);
                 setAppSecret(nextSecret);
+                // The error described the previous submit attempt.
+                setByoError("");
               }}
               disabled={registerBYO.isPending}
             />

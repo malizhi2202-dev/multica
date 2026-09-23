@@ -80,6 +80,7 @@ func tuituiInstallByo(t *testing.T, userID, agentID string) TuituiInstallationRe
 		tuituiBYORequest(userID, agentID, map[string]any{
 			"app_id":     tuituiUniqueAppID("tuitui"),
 			"app_secret": "pasted-app-secret",
+			"base_url":   "https://tuitui.test:8282",
 		}),
 		http.StatusOK,
 	)
@@ -96,7 +97,8 @@ func TestRegisterTuituiBYO_SealsAppSecretAtRest(t *testing.T) {
 	const appSecret = "super-secret-tuitui-app-secret"
 
 	response := testutil.Call(t, testHandler.RegisterTuituiBYO,
-		tuituiBYORequest(ownerID, agentID, RegisterTuituiBYORequest{AppID: appID, AppSecret: appSecret}))
+		tuituiBYORequest(ownerID, agentID, RegisterTuituiBYORequest{
+			BaseURL: "https://tuitui.test:8282", AppID: appID, AppSecret: appSecret}))
 	response.Want(http.StatusOK)
 	dbfx.Cleanup(t, `DELETE FROM channel_installation WHERE config ->> 'app_id' = $1`, appID)
 	if strings.Contains(response.Text(), appSecret) {
@@ -171,21 +173,186 @@ func TestRegisterTuituiBYO_RejectsBadRequestsWithoutFiveHundred(t *testing.T) {
 	})
 	t.Run("empty app id", func(t *testing.T) {
 		testutil.Call(t, testHandler.RegisterTuituiBYO,
-			tuituiBYORequest(ownerID, agentID, map[string]any{"app_id": "  ", "app_secret": "b"})).
+			tuituiBYORequest(ownerID, agentID, map[string]any{
+				"base_url": "https://tuitui.test", "app_id": "  ", "app_secret": "b"})).
 			Want(http.StatusBadRequest)
 	})
 	t.Run("empty app secret", func(t *testing.T) {
 		testutil.Call(t, testHandler.RegisterTuituiBYO,
-			tuituiBYORequest(ownerID, agentID, map[string]any{"app_id": "a", "app_secret": ""})).
+			tuituiBYORequest(ownerID, agentID, map[string]any{
+				"base_url": "https://tuitui.test", "app_id": "a", "app_secret": ""})).
 			Want(http.StatusBadRequest)
 	})
+}
+
+// TestRegisterTuituiBYO_ServerAddress is the one-field address matrix: the BYO
+// dialog collects a single "server address", the handler resolves it to the
+// adapter's host + port keys, and every rejection is a 400 whose writeError
+// body names the failing part. It also pins the storage shape: what lands in
+// channel_installation.config is exactly the keys the adapter reads, byte-idem
+// across equivalent spellings, with no port key when the user gave none (so
+// FromInstallConfig keeps filling its own default — the handler must not).
+func TestRegisterTuituiBYO_ServerAddress(t *testing.T) {
+	wireTuituiInstallService(t)
+	agentID, ownerID, _ := privateAgentTestFixture(t)
+
+	// accept runs one BYO install and returns the stored config blob.
+	accept := func(input string) map[string]any {
+		t.Helper()
+		appID := tuituiUniqueAppID("tuitui-addr")
+		out := testutil.Decode[TuituiInstallationResponse](t, testHandler.RegisterTuituiBYO,
+			tuituiBYORequest(ownerID, agentID, map[string]any{
+				"base_url": input, "app_id": appID, "app_secret": "addr-secret"}),
+			http.StatusOK)
+		dbfx.Cleanup(t, `DELETE FROM channel_installation WHERE id = $1`, out.ID)
+		var stored []byte
+		if err := testPool.QueryRow(context.Background(),
+			`SELECT config FROM channel_installation WHERE id = $1`, out.ID).Scan(&stored); err != nil {
+			t.Fatalf("read stored config: %v", err)
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(stored, &cfg); err != nil {
+			t.Fatalf("stored config is not JSON: %v: %s", err, stored)
+		}
+		return cfg
+	}
+
+	for _, tc := range []struct {
+		name, input, wantHost string
+		wantPort              int // 0 = the adapter default applies
+	}{
+		{"https with port", "https://tt.example.test:8443", "tt.example.test", 8443},
+		{"wss without port", "wss://tt.example.test", "tt.example.test", 0},
+		{"http without port", "http://tt.example.test", "tt.example.test", 0},
+		{"ws with port", "ws://tt.example.test:8080", "tt.example.test", 8080},
+		{"bare host:port", "tt.example.test:8282", "tt.example.test", 8282},
+		{"bare host", "tt.example.test", "tt.example.test", 0},
+		// The single trailing slash is normalized away — the one spelling
+		// tolerance the operator-facing design pinned.
+		{"https port slash", "https://tt.example.test:8443/", "tt.example.test", 8443},
+		{"ipv6 with port", "https://[::1]:8282", "[::1]", 8282},
+		{"ipv6 wss without port", "wss://[::1]", "[::1]", 0},
+		{"ipv6 full form with port", "https://[2001:db8::ff00:42:8329]:9443", "[2001:db8::ff00:42:8329]", 9443},
+		{"ipv6 with trailing slash", "https://[::1]:8282/", "[::1]", 8282},
+	} {
+		t.Run("accepts "+tc.name, func(t *testing.T) {
+			cfg := accept(tc.input)
+			if got, want := cfg["host"], tc.wantHost; got != want {
+				t.Fatalf("stored host = %v, want %q", got, want)
+			}
+			if tc.wantPort == 0 {
+				// Port omitted from the blob: the adapter's DefaultPort must
+				// stay the single source of that default.
+				if _, present := cfg["port"]; present {
+					t.Fatalf("stored config carries a port key %v, want it omitted so the adapter default applies", cfg["port"])
+				}
+			} else if got := cfg["port"]; got != float64(tc.wantPort) {
+				t.Fatalf("stored port = %v, want %d", got, tc.wantPort)
+			}
+		})
+	}
+
+	// Equivalent spellings must land on byte-identical host/port.
+	t.Run("trailing slash is stored identically", func(t *testing.T) {
+		plain, slashed := accept("https://tt.example.test:8443"), accept("https://tt.example.test:8443/")
+		for _, key := range []string{"host", "port"} {
+			if plain[key] != slashed[key] {
+				t.Fatalf("%s differs: %v vs %v", key, plain[key], slashed[key])
+			}
+		}
+	})
+
+	t.Run("rejects empty", func(t *testing.T) {
+		for _, input := range []string{"", "   "} {
+			testutil.Call(t, testHandler.RegisterTuituiBYO,
+				tuituiBYORequest(ownerID, agentID, map[string]any{
+					"base_url": input, "app_id": "a", "app_secret": "b"})).
+				Want(http.StatusBadRequest)
+		}
+	})
+	t.Run("rejects missing key", func(t *testing.T) {
+		rec := testutil.Call(t, testHandler.RegisterTuituiBYO,
+			tuituiBYORequest(ownerID, agentID, map[string]any{"app_id": "a", "app_secret": "b"}))
+		rec.Want(http.StatusBadRequest)
+		// The 400 is the repo writeError shape and names the field.
+		body := rec.Map()
+		msg, ok := body["error"].(string)
+		if !ok || !strings.Contains(msg, "server address") {
+			t.Fatalf("error body = %v, want writeError naming the server address", body)
+		}
+	})
+	for _, tc := range []struct{ name, input, wantErr string }{
+		{"path", "https://tt.example.test/robot/callback", "path"},
+		{"trailing slash then path", "https://tt.example.test:8443/a/", "path"},
+		{"double slash", "https://tt.example.test:8443//", "path"},
+		{"query", "https://tt.example.test:8443?a=1", "query"},
+		{"slash then query", "https://tt.example.test:8282/?a=1", "query"},
+		{"fragment", "https://tt.example.test:8443#x", "fragment"},
+		{"userinfo", "https://user:pw@tt.example.test", "username"},
+		{"bad scheme", "ftp://tt.example.test:21", "scheme"},
+		{"other scheme", "gopher://tt.example.test:70", "scheme"},
+		{"port out of range", "https://tt.example.test:65536", "port"},
+		{"port zero", "https://tt.example.test:0", "port"},
+		{"port not numeric", "https://tt.example.test:abc", "invalid"},
+		{"bare host with path", "tt.example.test/robot", "host"},
+		{"bare host with slash", "tt.example.test/", "host"},
+	} {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			rec := testutil.Call(t, testHandler.RegisterTuituiBYO,
+				tuituiBYORequest(ownerID, agentID, map[string]any{
+					"base_url": tc.input, "app_id": "a", "app_secret": "b"}))
+			rec.Want(http.StatusBadRequest)
+			body := rec.Map()
+			msg, ok := body["error"].(string)
+			if !ok || !strings.Contains(strings.ToLower(msg), tc.wantErr) {
+				t.Fatalf("error = %v, want it to mention %q", body, tc.wantErr)
+			}
+			if _, coded := body["code"]; coded {
+				t.Fatalf("rejection carries a code field %v, want the plain writeError shape", body)
+			}
+		})
+	}
+
+	t.Run("rejection persists nothing", func(t *testing.T) {
+		// A failed address must not leave a half-built row behind.
+		testutil.Call(t, testHandler.RegisterTuituiBYO,
+			tuituiBYORequest(ownerID, agentID, map[string]any{
+				"base_url": "https://tt.example.test/../x", "app_id": "a", "app_secret": "b"})).
+			Want(http.StatusBadRequest)
+	})
+}
+
+// TestTuituiEffectiveServerEcho pins the response echo: the register and list
+// answers name the server the bot actually dials, resolving stored gaps with
+// the adapter's own defaults instead of echoing an empty host or port 0.
+func TestTuituiEffectiveServerEcho(t *testing.T) {
+	cases := []struct {
+		name     string
+		stored   string
+		wantHost string
+		wantPort int
+	}{
+		{"full pair", `{"host":"tt.example.test","port":8443}`, "tt.example.test", 8443},
+		{"host only", `{"host":"tt.example.test"}`, "tt.example.test", tuituiintegration.DefaultPort},
+		{"legacy empty object", `{}`, tuituiintegration.DefaultHost, tuituiintegration.DefaultPort},
+		{"torn blob", `not json`, tuituiintegration.DefaultHost, tuituiintegration.DefaultPort},
+		{"out of range port falls back", `{"host":"tt.example.test","port":70000}`, "tt.example.test", tuituiintegration.DefaultPort},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			host, port := tuituiEffectiveServer([]byte(tc.stored))
+			if host != tc.wantHost || port != tc.wantPort {
+				t.Fatalf("effective server = %s:%d, want %s:%d", host, port, tc.wantHost, tc.wantPort)
+			}
+		})
+	}
 }
 
 func TestRegisterTuituiBYO_FollowsAgentManagePermission(t *testing.T) {
 	wireTuituiInstallService(t)
 	agentID, ownerID, memberID := privateAgentTestFixture(t)
 	adminID := createPermissionTestAdmin(t, "tuitui-register-admin@multica.test")
-	payload := map[string]any{"app_id": tuituiUniqueAppID("tuitui-perm"), "app_secret": "perm-secret"}
+	payload := map[string]any{"base_url": "https://tuitui.test:8282", "app_id": tuituiUniqueAppID("tuitui-perm"), "app_secret": "perm-secret"}
 
 	// A plain member cannot connect a bot to someone else's agent…
 	testutil.Call(t, testHandler.RegisterTuituiBYO,
@@ -207,7 +374,7 @@ func TestRegisterTuituiBYO_SameAppOnSecondAgentConflicts(t *testing.T) {
 	secondAgentID := dbfx.Agent(t, "Tuitui second agent", handlerTestRuntimeID(t),
 		testutil.Cols{"owner_id": ownerID})
 	appID := tuituiUniqueAppID("tuitui-conflict")
-	payload := map[string]any{"app_id": appID, "app_secret": "shared-secret"}
+	payload := map[string]any{"base_url": "https://tuitui.test:8282", "app_id": appID, "app_secret": "shared-secret"}
 	dbfx.Cleanup(t, `DELETE FROM channel_installation WHERE config ->> 'app_id' = $1`, appID)
 
 	first := testutil.Call(t, testHandler.RegisterTuituiBYO,

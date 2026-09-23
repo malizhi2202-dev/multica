@@ -4995,9 +4995,11 @@ export class ApiClient {
   }
 
   // registerTuituiBYO performs a bring-your-own-app install: the agent owner
-  // or a workspace owner/admin pastes the app_id + app_secret of the Tuitui
-  // robot application they created, and the backend validates + persists it,
-  // returning the new installation.
+  // or a workspace owner/admin enters the Tuitui server address (base_url —
+  // "https://host:port", "wss://host", or a bare "host[:port]") and pastes the
+  // app_id + app_secret of the Tuitui robot application they created, and the
+  // backend validates + persists it, returning the new installation with the
+  // effective host/port echoed.
   async registerTuituiBYO(
     workspaceId: string,
     agentId: string,

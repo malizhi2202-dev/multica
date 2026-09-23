@@ -3238,6 +3238,10 @@ export const TuituiInstallationSchema = z.object({
   created_at: z.string().default(""),
   updated_at: z.string().default(""),
   agent_available: z.boolean().optional(),
+  // Echoed from config->>'host' / config->>'port' (normalized at write). Old
+  // servers omit it — fail closed to an empty echo rather than throw.
+  host: z.string().catch("").default(""),
+  port: z.number().int().nonnegative().catch(0).default(0),
   bound_tuitui_user_ids: z.array(z.string()).catch([]).default([]),
 }).loose();
 
@@ -3250,6 +3254,8 @@ export const EMPTY_TUITUI_INSTALLATION: TuituiInstallation = {
   installed_at: "",
   created_at: "",
   updated_at: "",
+  host: "",
+  port: 0,
   bound_tuitui_user_ids: [],
 };
 
