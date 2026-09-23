@@ -314,12 +314,6 @@ func validateLocalPath(absPath string) error {
 	return nil
 }
 
-// isBlacklistedLocalPath and isBlacklistedRealPath are thin call sites into
-// the shared localpath package — the single source of truth for the
-// blacklist rules the daemon and the server-side directory browser must
-// agree on. The "local_directory: " message prefix is prepended by the
-// callers below, as before.
-
 // checkDirReadWrite verifies the daemon process can both read directory
 // contents and create/remove a probe file inside dir. The probe filename is
 // long, hidden, and unlikely to clash with user files; we delete it
