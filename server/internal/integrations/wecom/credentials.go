@@ -21,9 +21,15 @@ type CredentialsResolver interface {
 }
 
 // SecretboxCredentialsResolver decrypts the smart-bot secret using a single
-// secretbox.Box shared across every wecom installation. Rotation is the same
-// story as Feishu / Slack: change MULTICA_WECOM_SECRET_KEY, and every
-// existing row needs a re-encrypt migration.
+// secretbox.Box shared across every wecom installation: normally the stored
+// integration DEK (secretbox.ResolveIntegrationKey), with
+// MULTICA_WECOM_SECRET_KEY only an optional override that exists when the
+// operator explicitly set it. So the rotation story is conditional: swapping
+// the env var changes what new seals use ONLY on deployments that actually
+// set it, while replacing the stored DEK is the destructive operation —
+// every existing channel credential (Feishu / Slack included, they share the
+// DEK) becomes permanently undecryptable and there is no re-encryption path
+// today.
 type SecretboxCredentialsResolver struct {
 	Box *secretbox.Box
 }

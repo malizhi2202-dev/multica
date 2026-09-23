@@ -255,11 +255,12 @@ type Handler struct {
 	CloudRuntime                 cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client
-	// Lark integration. All three are nil when the Lark master key
-	// (MULTICA_LARK_SECRET_KEY) is unset; the corresponding HTTP
-	// handlers return 403 in that case so a misconfigured self-host
-	// deployment surfaces a clear error instead of silently using a
-	// zero key. Wired in cmd/server/router.go after handler.New.
+	// Lark integration. All three are nil when no Lark master key resolves
+	// at boot (legacy MULTICA_LARK_SECRET_KEY env override, else the stored
+	// integration DEK); the corresponding HTTP handlers return 403 in that
+	// case so a misconfigured deployment surfaces a clear error instead of
+	// silently using a zero key. Wired in cmd/server/router.go after
+	// handler.New.
 	LarkInstallations *lark.InstallationService
 	LarkBindingTokens *lark.BindingTokenService
 	// LarkRegistration owns the device-flow install lifecycle: begin
@@ -408,7 +409,9 @@ type Handler struct {
 	// cmd/server/router.go after New.
 	VCSSecretBox *secretbox.Box
 	// PluginSurfaceTokens seal short-lived launch claims. Nil disables surface
-	// launches; wired from a domain-separated MULTICA_PLUGIN_SECRET_KEY at boot.
+	// launches; wired at boot from the resolved plugin master key (legacy
+	// MULTICA_PLUGIN_SECRET_KEY env override, else the stored integration DEK),
+	// domain-separated for surface use.
 	PluginSurfaceTokens *secretbox.Box
 	// PRRefresh drives the GitHub API snapshot pipeline for PR cards (MUL-5265):
 	// webhook / page-visit / TTL triggers → authenticated GraphQL fetch →

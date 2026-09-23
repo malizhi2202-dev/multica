@@ -13,9 +13,10 @@ import (
 	"github.com/multica-ai/multica/server/internal/util/secretbox"
 )
 
-// Lark-handler unit tests focus on the no-config short-circuits —
-// verifying that a self-host deployment without MULTICA_LARK_SECRET_KEY
-// does NOT serve revoke / redeem / install, and that list degrades
+// Lark-handler unit tests focus on the nil-service short-circuits —
+// verifying that when a handler's Lark services were never wired (a bare
+// &Handler{} stands in for the boot path where no master key resolved) the
+// handlers do NOT serve revoke / redeem / install, and that list degrades
 // gracefully to an empty response so the Integrations tab still
 // renders. Happy-path flows (begin device-flow + poll status; token
 // mint + redeem) need a real DB and land alongside the WS hub
@@ -42,9 +43,9 @@ func TestRedeemLarkBindingToken_NotConfigured(t *testing.T) {
 }
 
 func TestBeginLarkInstall_NotConfigured(t *testing.T) {
-	// When the device-flow registration service is nil (no at-rest
-	// key, or the stub APIClient is the only one wired), the begin
-	// endpoint must short-circuit to 403 — silently returning a
+	// When the device-flow registration service is nil — the boot path
+	// where no master key resolved, or the service failed to construct —
+	// the begin endpoint must short-circuit to 403 — silently returning a
 	// "configured: false" envelope would hide a real misconfiguration
 	// from the operator. The UI hides the bind button in that case
 	// so this should not be reached through the normal flow.

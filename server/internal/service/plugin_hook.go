@@ -452,10 +452,14 @@ func (s *PluginService) SignHookPayload(installationID pgtype.UUID, timestamp st
 // one is stored hashed. Same deployment key, opposite directions.
 func (s *PluginService) hookSigningKey(installationID pgtype.UUID) ([]byte, error) {
 	if len(s.DeploymentKey) == 0 {
-		return nil, pluginErrf(PluginErrorUnavailable, "hooks are disabled: MULTICA_PLUGIN_SECRET_KEY is not configured")
+		return nil, pluginErrf(PluginErrorUnavailable, "hooks are disabled: no plugin master key resolved at boot (stored integration DEK, or the MULTICA_PLUGIN_SECRET_KEY override when set)")
 	}
+	// Defensive: secretbox.ResolveIntegrationKey enforces the 32-byte size on
+	// both sources (the env override must base64-decode to 32 bytes, the
+	// stored DEK is length-checked on read), so reaching this branch means a
+	// key of the wrong size was wired into the service directly.
 	if len(s.DeploymentKey) != 32 {
-		return nil, pluginErrf(PluginErrorUnavailable, "hooks are disabled: MULTICA_PLUGIN_SECRET_KEY must decode to 32 bytes")
+		return nil, pluginErrf(PluginErrorUnavailable, "hooks are disabled: the plugin master key must be 32 bytes (a MULTICA_PLUGIN_SECRET_KEY env override must base64-decode to that size)")
 	}
 	mac := hmac.New(sha256.New, s.DeploymentKey)
 	mac.Write([]byte("multica-plugin-hook-signature:v1:"))

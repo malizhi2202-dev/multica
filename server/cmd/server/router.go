@@ -566,7 +566,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// the InstallationService refuses to fall back to plaintext storage
 	// for app_secret, and the BindingTokenService cannot mint usable
 	// tokens without it either. When the key is absent the Lark
-	// handlers return 503 with a clear message; the rest of the server
+	// handlers return 403 with a clear message; the rest of the server
 	// continues to start so self-host deployments that have not opted
 	// in to Lark are unaffected. Feishu registers its Factory + ResolverSet
 	// into the channel engine above.
@@ -946,7 +946,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	//
 	// Gated by a resolved master key (MULTICA_WECOM_SECRET_KEY, else the stored
 	// integration DEK). Without one the whole block is
-	// skipped and the wecom Web-UI endpoints return 503; existing deployments
+	// skipped and the wecom Web-UI endpoints return 403; existing deployments
 	// are unaffected. The smart-bot flow does NOT require any public HTTP
 	// callback, so nothing else needs to be exposed to the internet.
 	if wecomSecret, err := secretbox.ResolveIntegrationKey(context.Background(), "MULTICA_WECOM_SECRET_KEY", dekQueries); err == nil {

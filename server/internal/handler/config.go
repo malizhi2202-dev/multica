@@ -38,12 +38,15 @@ type AppConfig struct {
 	DaemonAppURL    string `json:"daemon_app_url,omitempty"`
 
 	// VCSIntegrationAvailable mirrors the MULTICA_VCS_INTEGRATION_ENABLED
-	// deployment switch so the Settings UI can hide the whole self-hosted Git
-	// provider section on deployments where it is off (the managed cloud),
-	// instead of rendering it and surfacing an operator-only "missing
-	// MULTICA_VCS_SECRET_KEY" hint a cloud user cannot resolve. Omitted when
-	// false so the managed-cloud response keeps its previous shape; the UI
-	// defaults absent to false (hidden).
+	// feature switch — the section's only deployment-level gate now that the
+	// at-rest encryption key resolves itself on first boot (stored
+	// integration DEK; the MULTICA_VCS_SECRET_KEY env is only an optional
+	// override). The Settings UI uses it to hide the whole self-hosted Git
+	// provider section where the feature is off (the managed cloud). Whether
+	// a key actually resolved is separate and reported per request as
+	// `configured` by the connections endpoint. Omitted when false so the
+	// managed-cloud response keeps its previous shape; the UI defaults absent
+	// to false (hidden).
 	VCSIntegrationAvailable bool `json:"vcs_integration_available,omitempty"`
 
 	// PostHog public config for the frontend. The key is the same Project

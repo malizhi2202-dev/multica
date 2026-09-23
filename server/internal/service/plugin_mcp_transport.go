@@ -255,7 +255,7 @@ func (s *PluginService) mcpCredentialHeaders(ctx context.Context, installation d
 // exists to make structural.
 func (s *PluginService) decryptedSecret(ctx context.Context, installationID pgtype.UUID, key string) (string, error) {
 	if s.Secrets == nil {
-		return "", pluginErrf(PluginErrorUnavailable, "plugin secrets are disabled: MULTICA_PLUGIN_SECRET_KEY is not configured")
+		return "", pluginErrf(PluginErrorUnavailable, "plugin secrets are disabled: no plugin master key resolved at boot (stored integration DEK, or the MULTICA_PLUGIN_SECRET_KEY override when set)")
 	}
 	row, err := s.Queries.GetPluginSecret(ctx, db.GetPluginSecretParams{InstallationID: installationID, Key: key})
 	if err != nil {

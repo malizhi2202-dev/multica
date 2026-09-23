@@ -66,12 +66,14 @@ func larkInstallationToResponse(row lark.Installation) LarkInstallationResponse 
 // admin route's authorization, so exposing it is harmless.
 //
 // Response fields:
-//   - configured: at-rest encryption key is set (`LarkInstallations
-//     != nil`). When false, no install flow can succeed at all; the
-//     UI hides the tab.
+//   - configured: an at-rest encryption key resolved at boot, so the
+//     integration is wired (`LarkInstallations != nil`). When false, no
+//     install flow can succeed at all; the UI hides the tab.
 //   - install_supported: the device-flow install path is wired
-//     end-to-end: a RegistrationService exists (deployment supplied
-//     MULTICA_LARK_SECRET_KEY) AND the APIClient.IsConfigured signal
+//     end-to-end: a RegistrationService exists (which needs a Lark
+//     master key to have resolved at boot — the stored integration DEK,
+//     or the MULTICA_LARK_SECRET_KEY override when set) AND the
+//     APIClient.IsConfigured signal
 //     is true (the real Lark HTTP client is in place — the stub
 //     cannot complete the post-poll GetBotInfo call). When false,
 //     the agent-detail "Bind" button stays hidden and the Settings
@@ -272,9 +274,10 @@ type BeginLarkInstallResponse struct {
 // Multica Agent the new Bot will be bound to; the agent must belong to
 // this workspace (RegistrationService re-checks that defense-in-depth).
 //
-// Returns 503 when the integration is not wired (no at-rest key, no
-// HTTP client, no RegistrationService); the UI hides the bind button
-// in that case so this should not be reached through the normal flow.
+// Returns 403 (writeFeatureDisabled) when no RegistrationService was wired
+// at boot — no master key resolved, or the service failed to construct; the
+// UI hides the bind button in that case so this should not be reached through
+// the normal flow.
 func (h *Handler) BeginLarkInstall(w http.ResponseWriter, r *http.Request) {
 	if h.LarkRegistration == nil {
 		writeFeatureDisabled(w, "lark_not_configured", "lark install not configured")

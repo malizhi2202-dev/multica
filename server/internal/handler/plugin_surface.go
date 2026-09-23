@@ -153,8 +153,16 @@ func (h *Handler) GetPluginSurfaceLaunch(w http.ResponseWriter, r *http.Request)
 	if !h.requirePluginsV1(w, r) {
 		return
 	}
-	if strings.TrimSpace(h.cfg.PluginSurfaceOrigin) == "" || h.PluginSurfaceTokens == nil {
-		writeFeatureDisabled(w, "plugin_surfaces_not_configured", "Plugin surfaces are unavailable: MULTICA_PLUGIN_SURFACE_ORIGIN and MULTICA_PLUGIN_SECRET_KEY must be configured")
+	// Two independent gates, reported separately so the message names the one
+	// that actually failed: the surface origin is still a required env var,
+	// while the launch-token box only needs a master key to have resolved at
+	// boot (stored integration DEK, or the MULTICA_PLUGIN_SECRET_KEY override).
+	if strings.TrimSpace(h.cfg.PluginSurfaceOrigin) == "" {
+		writeFeatureDisabled(w, "plugin_surfaces_not_configured", "Plugin surfaces are unavailable: MULTICA_PLUGIN_SURFACE_ORIGIN is not configured for this deployment")
+		return
+	}
+	if h.PluginSurfaceTokens == nil {
+		writeFeatureDisabled(w, "plugin_surfaces_not_configured", "Plugin surfaces are unavailable: no plugin master key resolved at boot (stored integration DEK, or the MULTICA_PLUGIN_SECRET_KEY override when set)")
 		return
 	}
 	origin, err := parsePluginSurfaceOrigin(h.cfg.PluginSurfaceOrigin)

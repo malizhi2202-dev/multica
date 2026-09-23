@@ -43,9 +43,11 @@ type PluginService struct {
 	DevOrigins []string
 	// Host gates which declared contributions this build can actually run.
 	Host plugincontract.Capabilities
-	// DeploymentKey is the raw MULTICA_PLUGIN_SECRET_KEY, used to derive each
-	// installation's hook signing secret. Held separately from Secrets because
-	// signing needs a key it can reproduce, not a sealed box.
+	// DeploymentKey is the raw resolved plugin master key — the stored
+	// integration DEK, or the MULTICA_PLUGIN_SECRET_KEY override when set —
+	// used to derive each installation's hook signing secret. Held separately
+	// from Secrets because signing needs a key it can reproduce, not a sealed
+	// box.
 	DeploymentKey []byte
 	// Callbacks issues the short-lived tokens a hook handler uses to call back.
 	// Nil means hooks go out without one.
@@ -584,7 +586,7 @@ func (s *PluginService) SetConfig(ctx context.Context, installation db.PluginIns
 	}
 
 	if len(secrets) > 0 && s.Secrets == nil {
-		return db.PluginInstallation{}, pluginErrf(PluginErrorUnavailable, "plugin secrets are disabled: MULTICA_PLUGIN_SECRET_KEY is not configured")
+		return db.PluginInstallation{}, pluginErrf(PluginErrorUnavailable, "plugin secrets are disabled: no plugin master key resolved at boot (stored integration DEK, or the MULTICA_PLUGIN_SECRET_KEY override when set)")
 	}
 
 	// Secrets and plain values are two tables with no foreign key between them,

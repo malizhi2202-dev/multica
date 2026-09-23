@@ -46,7 +46,8 @@ const vcsWebhookPathPrefix = "/api/webhooks/vcs/"
 
 // isVCSAvailable reports whether this deployment offers the self-hosted Git
 // provider integration at all. It is the product boundary (self-host only) and
-// is independent of isVCSConfigured (whether the encryption key is set): the
+// is independent of isVCSConfigured (whether an encryption key resolved at
+// boot — the stored integration DEK, or the MULTICA_VCS_SECRET_KEY override): the
 // managed cloud leaves it off, so connect/rotate/webhook reject and the UI
 // hides the section rather than surfacing an operator-only "missing key" hint.
 func (h *Handler) isVCSAvailable() bool { return h.cfg.VCSIntegrationEnabled }
@@ -165,7 +166,7 @@ func (h *Handler) ConnectVCS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.isVCSConfigured() {
-		writeFeatureDisabled(w, "vcs_not_configured", "vcs integration not configured (MULTICA_VCS_SECRET_KEY unset)")
+		writeFeatureDisabled(w, "vcs_not_configured", "vcs integration not configured: no encryption key resolved at boot (stored integration DEK, or the MULTICA_VCS_SECRET_KEY override when set)")
 		return
 	}
 
@@ -287,7 +288,7 @@ func (h *Handler) RotateVCSConnectionWebhook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !h.isVCSConfigured() {
-		writeFeatureDisabled(w, "vcs_not_configured", "vcs integration not configured (MULTICA_VCS_SECRET_KEY unset)")
+		writeFeatureDisabled(w, "vcs_not_configured", "vcs integration not configured: no encryption key resolved at boot (stored integration DEK, or the MULTICA_VCS_SECRET_KEY override when set)")
 		return
 	}
 
