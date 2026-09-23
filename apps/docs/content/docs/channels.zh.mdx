@@ -86,7 +86,7 @@ Telegram 目前只处理文字消息。不支持的媒体消息会收到一句�
 
 ## 自托管
 
-自托管部署需要先为对应平台配置一个 32 字节加密密钥，Multica 才会开放连接入口：
+Multica 在首次启动时自动生成一个 32 字节加密密钥并保存到数据库中，加密已保存的 Bot 凭据用的就是它，因此自托管部署无需任何前置配置即可开放连接入口。只有想自带密钥时才需要设置以下变量：
 
 ```dotenv
 MULTICA_LARK_SECRET_KEY=<base64 编码的 32 字节密钥>
@@ -96,7 +96,7 @@ MULTICA_WECOM_SECRET_KEY=<base64 编码的 32 字节密钥>
 MULTICA_TELEGRAM_SECRET_KEY=<base64 编码的 32 字节密钥>
 ```
 
-这些密钥用于加密保存 Bot 凭据。生成、保存和轮换方法见[环境变量](/environment-variables)。Multica Cloud 已完成这项配置。
+每个变量只覆盖对应平台的密钥，不设置不会影响其他平台。生成、保存和轮换方法见[环境变量](/environment-variables)。Multica Cloud 已完成这项配置。
 
 企业微信的出站只有一条路径——某个进程持有的 WebSocket。回复产生在**其他副本**上时会发生什么，取决于实时中继（realtime relay）的模式：
 

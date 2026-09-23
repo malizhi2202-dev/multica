@@ -86,7 +86,7 @@ After disconnecting, the Bot stops receiving new messages. Existing Multica conv
 
 ## Self-hosting
 
-A self-hosted deployment must configure a 32-byte encryption key for each platform before Multica opens its connection entry point:
+Multica generates a 32-byte encryption key on first startup and stores it in the database; that key is what encrypts stored Bot credentials, so a self-hosted deployment needs no prior configuration to open a connection entry point. Set any of these only to bring your own key:
 
 ```dotenv
 MULTICA_LARK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -96,7 +96,7 @@ MULTICA_WECOM_SECRET_KEY=<base64-encoded 32-byte key>
 MULTICA_TELEGRAM_SECRET_KEY=<base64-encoded 32-byte key>
 ```
 
-These keys encrypt stored Bot credentials. See [Environment variables](/environment-variables) for how to generate, store, and rotate them. Multica Cloud already has this configured.
+Each variable overrides the generated key for its own platform alone; leaving it unset changes nothing for the others. See [Environment variables](/environment-variables) for how to generate, store, and rotate them. Multica Cloud already has this configured.
 
 WeCom's only outbound path is the WebSocket held by one process, so what happens to a reply produced on a *different* replica depends on the realtime relay:
 

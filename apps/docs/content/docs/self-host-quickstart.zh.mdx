@@ -48,7 +48,7 @@ make selfhost
 第一次运行时，`make selfhost` 会：
 
 1. 从 `.env.example` 创建 `.env`
-2. 随机生成 `JWT_SECRET`、PostgreSQL 密码和 `MULTICA_VCS_SECRET_KEY`（自托管 Git 集成的加密密钥）
+2. 随机生成 `JWT_SECRET`、PostgreSQL 密码和 `MULTICA_VCS_SECRET_KEY`（自托管 Git 集成所用加密密钥的可选覆盖；不设置时 Multica 会自己生成一把）
 3. 拉取 PostgreSQL、Multica backend 和 Multica frontend 镜像
 4. 创建持久化数据卷并启动三个容器
 5. 等待 backend 开始响应健康检查

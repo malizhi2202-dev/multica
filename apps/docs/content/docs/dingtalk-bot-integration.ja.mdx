@@ -86,7 +86,7 @@ Multica は DingTalk メッセージを受信すると、元のユーザーメ�
 
 ## セルフホスト設定
 
-Multica Cloud ユーザーはこのセクションをスキップできます。セルフホスト環境では、DingTalk の `AppSecret` を暗号化するためのキーを先に設定します。
+Multica Cloud ユーザーはこのセクションをスキップできます。セルフホスト環境でも独自にキーを用意する必要はありません。保存される DingTalk の `AppSecret` は、Multica が初回起動時に自動生成してデータベースに保管する 32 バイトのキーで暗号化されるためです。自分のキーを指定したい場合のみ設定してください。
 
 ```dotenv
 MULTICA_DINGTALK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -98,7 +98,7 @@ MULTICA_DINGTALK_SECRET_KEY=<base64-encoded 32-byte key>
 openssl rand -base64 32
 ```
 
-API サービスを再起動した後、DingTalk に接続します。このキーは長期間保存してください。変更または紛失すると、既存のトークンを復号できず、再接続が必要になります。
+設定後は API サービスを再起動してから、DingTalk に接続します。このキーが適用されるのは DingTalk だけです。自分で設定したキーは長期間保存してください。変更または紛失すると、そのキーで暗号化したトークンを復号できず、再接続が必要になります。
 
 アカウント連携リンクは `MULTICA_APP_URL` を使用し、未設定の場合は `FRONTEND_ORIGIN` にフォールバックします。メンバーがアクセスできる Multica のアドレスを指定してください。
 

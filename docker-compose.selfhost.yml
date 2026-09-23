@@ -136,8 +136,10 @@ services:
       # X-Forwarded-Host spoofing on misconfigured proxies.
       MULTICA_PUBLIC_URL: ${MULTICA_PUBLIC_URL:-}
       # Surface HTML must use a second, cookie-free browser origin routed to
-      # this backend. Both settings are optional only in the sense that leaving
-      # either empty disables plugin surfaces rather than weakening isolation.
+      # this backend. Leaving MULTICA_PLUGIN_SURFACE_ORIGIN empty disables
+      # plugin surfaces rather than weakening isolation. MULTICA_PLUGIN_SECRET_KEY
+      # is an optional override of the key generated on first startup, for
+      # Plugins only.
       MULTICA_PLUGIN_SECRET_KEY: ${MULTICA_PLUGIN_SECRET_KEY:-}
       MULTICA_PLUGIN_SURFACE_ORIGIN: ${MULTICA_PLUGIN_SURFACE_ORIGIN:-}
       MULTICA_PLUGIN_API_URL: ${MULTICA_PLUGIN_API_URL:-}
@@ -160,8 +162,9 @@ services:
       MULTICA_LLM_BASE_URL: ${MULTICA_LLM_BASE_URL:-}
       MULTICA_LLM_DEFAULT_MODEL: ${MULTICA_LLM_DEFAULT_MODEL:-}
       MULTICA_LLM_MAX_RETRIES: ${MULTICA_LLM_MAX_RETRIES:-}
-      # Lark / Feishu bot integration. MULTICA_LARK_SECRET_KEY is the
-      # opt-in: unset = integration disabled. Mainland 飞书 and international
+      # Lark / Feishu bot integration. MULTICA_LARK_SECRET_KEY is an optional
+      # override of the key generated on first startup, and it covers Lark only.
+      # Mainland 飞书 and international
       # Lark are auto-detected per installation and served side by side, so
       # the two base-URL knobs should normally stay EMPTY. They are optional
       # deployment-wide overrides that force every installation onto one host
@@ -172,24 +175,27 @@ services:
       MULTICA_LARK_SECRET_KEY: ${MULTICA_LARK_SECRET_KEY:-}
       MULTICA_LARK_HTTP_BASE_URL: ${MULTICA_LARK_HTTP_BASE_URL:-}
       MULTICA_LARK_CALLBACK_BASE_URL: ${MULTICA_LARK_CALLBACK_BASE_URL:-}
-      # Slack bot integration. MULTICA_SLACK_SECRET_KEY is the opt-in: unset =
-      # integration disabled. It decrypts the per-installation bot/app tokens,
-      # which are brought by each workspace via OAuth/BYO and stored encrypted
-      # in the database, so this single deployment-wide key is all the operator
-      # needs to set here.
+      # Slack bot integration. MULTICA_SLACK_SECRET_KEY is an optional override
+      # of the key generated on first startup, and it covers Slack only. It
+      # decrypts the per-installation bot/app tokens, which are brought by each
+      # workspace via OAuth/BYO and stored encrypted in the database, so the
+      # integration works with nothing set here.
       MULTICA_SLACK_SECRET_KEY: ${MULTICA_SLACK_SECRET_KEY:-}
       # Self-hosted Git provider integration (Forgejo / Gitea / GitLab). This
       # is a self-host-only feature, so the compose file turns it on by default;
-      # the managed cloud leaves it unset (off). It still needs a valid
-      # MULTICA_VCS_SECRET_KEY below to actually work.
+      # the managed cloud leaves it unset (off). That switch is what makes the
+      # feature available; MULTICA_VCS_SECRET_KEY below is only an optional
+      # override of the key generated on first startup.
       MULTICA_VCS_INTEGRATION_ENABLED: ${MULTICA_VCS_INTEGRATION_ENABLED:-true}
-      # VCS integration at-rest encryption key for token-based providers
+      # Optional override of the VCS integration at-rest encryption key for
+      # token-based providers
       MULTICA_VCS_SECRET_KEY: ${MULTICA_VCS_SECRET_KEY:-}
-      # WeCom smart-bot integration. MULTICA_WECOM_SECRET_KEY is the
-      # opt-in: unset = integration disabled. It encrypts each installation's
-      # smart-bot secret at rest. The server needs it to unseal a bot's
-      # subscribe credentials at connection time, and to seal the secret when
-      # an installation is created from the WeCom settings tab.
+      # WeCom smart-bot integration. MULTICA_WECOM_SECRET_KEY is an optional
+      # override of the key generated on first startup, and it covers WeCom
+      # only. It encrypts each installation's smart-bot secret at rest. The
+      # server needs a key to unseal a bot's subscribe credentials at connection
+      # time, and to seal the secret when an installation is created from the
+      # WeCom settings tab.
       MULTICA_WECOM_SECRET_KEY: ${MULTICA_WECOM_SECRET_KEY:-}
       # Comma-separated ranges the inbound media fetcher may dial even though
       # they look reserved. Empty (the default) keeps the SSRF guard as strict

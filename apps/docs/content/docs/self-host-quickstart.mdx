@@ -48,7 +48,7 @@ make selfhost
 On first run, `make selfhost` will:
 
 1. Create `.env` from `.env.example`
-2. Generate a random `JWT_SECRET`, PostgreSQL password, and `MULTICA_VCS_SECRET_KEY` (the encryption key for self-hosted Git integrations)
+2. Generate a random `JWT_SECRET`, PostgreSQL password, and `MULTICA_VCS_SECRET_KEY` (an optional override of the encryption key used by self-hosted Git integrations, which Multica generates itself when unset)
 3. Pull the PostgreSQL, Multica backend, and Multica frontend images
 4. Create persistent volumes and start the three containers
 5. Wait until the backend starts answering health checks

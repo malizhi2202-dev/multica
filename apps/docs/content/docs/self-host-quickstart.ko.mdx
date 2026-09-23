@@ -48,7 +48,7 @@ make selfhost
 처음 실행할 때 `make selfhost`가 다음 작업을 수행합니다.
 
 1. `.env.example`에서 `.env` 생성
-2. `JWT_SECRET`, PostgreSQL 비밀번호, `MULTICA_VCS_SECRET_KEY`(자체 호스팅 Git 연동 암호화 키)를 임의 생성
+2. `JWT_SECRET`, PostgreSQL 비밀번호, `MULTICA_VCS_SECRET_KEY`(자체 호스팅 Git 연동에서 쓰는 암호화 키의 선택적 대체 값. 지정하지 않으면 Multica가 직접 생성한다)를 임의 생성
 3. PostgreSQL, Multica backend, Multica frontend 이미지 pull
 4. persistent data volume 생성 및 세 컨테이너 시작
 5. backend가 health check에 응답할 때까지 대기

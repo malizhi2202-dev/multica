@@ -6,7 +6,7 @@ description: ワークスペースごとにセルフホストの Forgejo、Gitea
 import { Callout } from "fumadocs-ui/components/callout";
 
 <Callout type="warn">
-**セルフホスト版 Multica 専用です。** この連携は Multica を**自分でデプロイしている**場合のみ利用でき、Multica Cloud では提供されません。ここでの「セルフホスト」は **Multica 自体**のセルフホストを意味します。通常は独自ネットワーク内の Git インスタンスへアクセスするために使用します。サーバー運用者が `MULTICA_VCS_INTEGRATION_ENABLED=true` を設定して機能を有効にし、`MULTICA_VCS_SECRET_KEY` も設定する必要があります。それまでは、設定 → 連携にこのセクションは表示されません。
+**セルフホスト版 Multica 専用です。** この連携は Multica を**自分でデプロイしている**場合のみ利用でき、Multica Cloud では提供されません。ここでの「セルフホスト」は **Multica 自体**のセルフホストを意味します。通常は独自ネットワーク内の Git インスタンスへアクセスするために使用します。サーバー運用者が `MULTICA_VCS_INTEGRATION_ENABLED=true` を設定して機能を有効にする必要があります。それまでは、設定 → 連携にこのセクションは表示されません。
 </Callout>
 
 Multica はワークスペースごとにセルフホストの Git ホスティング、**Forgejo**、**Gitea**、**GitLab** のいずれかへ接続します。接続後、ブランチ名かタイトルにタスク番号（例: `MUL-123`）を含む Pull Request（GitLab では Merge Request）、または本文で終了キーワードの直後にタスク番号を置いた PR は、対応する[タスク](/issues)へ**自動的に紐づけられ**、タスクサイドバーの **Pull requests** に表示されます。終了キーワードを含む PR がマージされると、タスクは「完了」へ移動します。head commit の CI はカード上のチェックバーとして表示されます。
@@ -27,7 +27,7 @@ MULTICA_VCS_INTEGRATION_ENABLED=true
 
 公式のセルフホスト用 `docker compose` ファイル（`docker-compose.selfhost.yml`）では設定済みです。
 
-次に、保存する認証情報をサーバーが暗号化するための、base64 でエンコードした 32 バイトの鍵を設定します。設定しない場合、接続フォームは利用できません。
+サーバーは保存する認証情報を、初回起動時に自動生成してデータベースに保管する 32 バイトの鍵で暗号化します。鍵を設定しなくても接続フォームは使えます。自分の鍵を指定したい場合のみ、base64 でエンコードした 32 バイトの鍵を設定してください。
 
 ```sh
 openssl rand -base64 32
@@ -37,7 +37,7 @@ openssl rand -base64 32
 MULTICA_VCS_SECRET_KEY=<base64 32 バイト鍵>
 ```
 
-両方が必要です。スイッチは機能を提供するかどうかを決め、鍵は保存するトークンと Webhook secret を暗号化します。接続、Webhook、ローテーションはいずれも両方の設定を必要とします。
+スイッチは機能を提供するかどうかを決めます。キーは自動生成された鍵をこの連携についてだけ置き換えるもので、接続、Webhook、ローテーションはいずれも実際に解決されたキーを使います。自分の鍵を指定した場合は継続して保管してください。その鍵を差し替えたり紛失したりすると、その鍵で暗号化済みの認証情報を復号できません。
 
 `MULTICA_PUBLIC_URL` にサーバーの公開ベース URL を設定すると、Multica がそのまま貼り付けられる Webhook URL を表示できます。設定しない場合、画面には Webhook のパスだけが表示されるため、origin を自分で補います。
 

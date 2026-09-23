@@ -169,7 +169,7 @@ After disconnecting, the Socket Mode connection stops and the Bot no longer rece
 
 ## Self-hosting setup
 
-Multica Cloud needs no extra configuration. A self-hosted deployment must first set a key used to encrypt Slack tokens:
+Multica Cloud needs no extra configuration, and neither does a self-hosted deployment: stored Slack tokens are encrypted with a 32-byte key that the server generates on first startup and keeps in its database. Set this key only to bring your own:
 
 ```dotenv
 MULTICA_SLACK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -181,7 +181,7 @@ Generate one like this:
 openssl rand -base64 32
 ```
 
-Restart the API server, then connect the Slack app. Keep this key long-term: if it is rotated or lost, existing tokens can no longer be decrypted and the Bot must be reconnected.
+Restart the API server after setting it, then connect the Slack app. The override covers Slack alone. Keep a key you set yourself long-term: if it is rotated or lost, the tokens it sealed can no longer be decrypted and the Bot must be reconnected.
 
 Account binding links use `MULTICA_APP_URL`, falling back to `FRONTEND_ORIGIN` when unset; it must point to a Multica address members can reach.
 

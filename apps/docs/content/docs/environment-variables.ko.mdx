@@ -173,21 +173,23 @@ reverse proxy 뒤에 배포한다면 실제 proxy 네트워크를 입력해야 �
 
 ## 외부 연동
 
+Multica는 첫 시작 시 32바이트 자격 증명 암호화 키를 자동 생성해 데이터베이스에 저장하므로, 아래 `MULTICA_*_SECRET_KEY`는 모두 선택적인 대체 값입니다. 자체 키를 쓰려는 경우에만 지정하세요. 각 키는 해당 연동에만 적용됩니다.
+
 | 연동 | 변수 | 설명 |
 |---|---|---|
 | GitHub | `GITHUB_APP_SLUG` | GitHub App slug |
 | GitHub | `GITHUB_WEBHOOK_SECRET` | Webhook HMAC 및 연결 state 서명 키 |
 | GitHub | `GITHUB_APP_ID` | PR 카드의 CI 상태, merge 가능 여부, "GitHub에서 선택" 저장소에 필요 |
 | GitHub | `GITHUB_APP_PRIVATE_KEY` | App ID와 짝을 이루는 전체 PEM private key. 용도는 위와 같음 |
-| Feishu | `MULTICA_LARK_SECRET_KEY` | base64로 인코딩한 32바이트 자격 증명 암호화 키 |
-| Slack | `MULTICA_SLACK_SECRET_KEY` | base64로 인코딩한 32바이트 token 암호화 키 |
-| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | base64로 인코딩한 32바이트 Bot token 암호화 키 |
+| Feishu | `MULTICA_LARK_SECRET_KEY` | Feishu의 base64로 인코딩한 32바이트 자격 증명 암호화 키 (선택적 대체) |
+| Slack | `MULTICA_SLACK_SECRET_KEY` | Slack의 base64로 인코딩한 32바이트 token 암호화 키 (선택적 대체) |
+| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | Telegram의 base64로 인코딩한 32바이트 Bot token 암호화 키 (선택적 대체) |
 | Composio | `COMPOSIO_API_KEY` | Composio 도구 연결 활성화 |
 | Composio | `COMPOSIO_CALLBACK_BASE_URL` | callback API 주소. `MULTICA_PUBLIC_URL`로 fallback 가능 |
 | Composio | `COMPOSIO_STATE_SECRET` | OAuth state 서명 키. `JWT_SECRET`에서 파생 가능 |
 | 자체 호스팅 Git | `MULTICA_VCS_INTEGRATION_ENABLED` | Forgejo/Gitea/GitLab 연동 스위치. compose에서는 기본 활성화 |
-| 자체 호스팅 Git | `MULTICA_VCS_SECRET_KEY` | base64로 인코딩한 32바이트 암호화 키(`openssl rand -base64 32`). 없으면 전체 기능을 사용할 수 없음 |
-| Plugins | `MULTICA_PLUGIN_SECRET_KEY` | 저장된 secret과 surface 실행 URL을 암호화하는 base64 인코딩 32바이트 키 |
+| 자체 호스팅 Git | `MULTICA_VCS_SECRET_KEY` | base64로 인코딩한 32바이트 암호화 키(`openssl rand -base64 32`)의 선택적 대체. 기능 제공 여부는 위 스위치가 결정합니다 |
+| Plugins | `MULTICA_PLUGIN_SECRET_KEY` | 저장된 secret과 surface 실행 URL을 암호화하는 base64 인코딩 32바이트 키. Plugins만 별도 키를 쓰려면 지정합니다 (선택) |
 | Plugins | `MULTICA_PLUGIN_SURFACE_ORIGIN` | 백엔드로 라우팅되는 쿠키 없는 전용 origin. app/API origin과 달라야 하며 `Host`를 보존해야 함 |
 | Plugins | `MULTICA_PLUGIN_API_URL` | 버전을 포함한 Plugin Public API의 전체 Base URL(예: `https://plugin-api.example.com/v1`). 설정하지 않으면 `MULTICA_PUBLIC_URL` + `/v1` 사용 |
 | Plugins | `MULTICA_PLUGIN_DIR` | 개발 중 로컬 plugin bundle을 게시하는 선택적 절대 디렉터리 |

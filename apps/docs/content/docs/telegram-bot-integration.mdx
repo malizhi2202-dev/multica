@@ -71,13 +71,13 @@ Open **Settings → Integrations → Telegram** to view connected Bots. Owners a
 
 ## Self-hosting setup
 
-Set a stable 32-byte encryption key before starting the API server:
+Multica encrypts stored Bot tokens with a 32-byte key that it generates on first startup and keeps in its database, so a self-hosted deployment needs no key of its own. Set this one only to bring your own:
 
 ```dotenv
 MULTICA_TELEGRAM_SECRET_KEY=<base64-encoded 32-byte key>
 ```
 
-Generate one with `openssl rand -base64 32`. Keep it long-term: losing or rotating it makes existing Bot tokens unreadable and requires reconnecting each Bot.
+Generate one with `openssl rand -base64 32`. The override covers Telegram alone, and a key you set yourself has to be kept long-term: losing or rotating it makes the tokens it sealed unreadable and requires reconnecting each Bot.
 
 Binding links use `MULTICA_APP_URL`, falling back to `FRONTEND_ORIGIN`. The resulting address must be reachable by members. The server's network or proxy must allow HTTPS access to `api.telegram.org`; Go honors standard `HTTPS_PROXY` and `NO_PROXY` environment variables.
 

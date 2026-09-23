@@ -173,21 +173,23 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 
 ## 外部集成
 
+Multica 在首次启动时自动生成 32 字节凭据加密密钥并保存到数据库中，所以下面每个 `MULTICA_*_SECRET_KEY` 都是可选覆盖：只有想自带密钥时才设，而且只作用于自己那一家集成。
+
 | 集成 | 变量 | 说明 |
 |---|---|---|
 | GitHub | `GITHUB_APP_SLUG` | GitHub App slug |
 | GitHub | `GITHUB_WEBHOOK_SECRET` | Webhook HMAC 与连接 state 签名密钥 |
 | GitHub | `GITHUB_APP_ID` | PR 卡片的 CI 状态、可合并性和"从 GitHub 选择"仓库都需要它 |
 | GitHub | `GITHUB_APP_PRIVATE_KEY` | 与 App ID 配套的完整 PEM 私钥，用途同上 |
-| 飞书 | `MULTICA_LARK_SECRET_KEY` | base64 编码的 32 字节凭据加密密钥 |
-| Slack | `MULTICA_SLACK_SECRET_KEY` | base64 编码的 32 字节 token 加密密钥 |
-| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | base64 编码的 32 字节 Bot token 加密密钥 |
+| 飞书 | `MULTICA_LARK_SECRET_KEY` | 可选覆盖项，覆盖飞书这一家使用的 base64 编码 32 字节凭据加密密钥 |
+| Slack | `MULTICA_SLACK_SECRET_KEY` | 可选覆盖项，覆盖 Slack 这一家使用的 base64 编码 32 字节 token 加密密钥 |
+| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | 可选覆盖项，覆盖 Telegram 这一家使用的 base64 编码 32 字节 Bot token 加密密钥 |
 | Composio | `COMPOSIO_API_KEY` | 启用 Composio 工具连接 |
 | Composio | `COMPOSIO_CALLBACK_BASE_URL` | 回调 API 地址；可回退到 `MULTICA_PUBLIC_URL` |
 | Composio | `COMPOSIO_STATE_SECRET` | OAuth state 签名密钥；可从 `JWT_SECRET` 派生 |
 | 自托管 Git | `MULTICA_VCS_INTEGRATION_ENABLED` | Forgejo/Gitea/GitLab 集成开关，compose 默认开启 |
-| 自托管 Git | `MULTICA_VCS_SECRET_KEY` | base64 编码的 32 字节加密密钥（`openssl rand -base64 32`）；未配置时该功能整体不可用 |
-| 插件 | `MULTICA_PLUGIN_SECRET_KEY` | base64 编码的 32 字节密钥，用于加密已存 secret 和 surface 启动 URL |
+| 自托管 Git | `MULTICA_VCS_SECRET_KEY` | 可选覆盖项，base64 编码的 32 字节加密密钥（`openssl rand -base64 32`）；该功能是否开放只由上面的开关决定 |
+| 插件 | `MULTICA_PLUGIN_SECRET_KEY` | 可选覆盖项，base64 编码的 32 字节密钥，用于加密已存 secret 和 surface 启动 URL；只有想让插件单独用一把密钥时才设 |
 | 插件 | `MULTICA_PLUGIN_SURFACE_ORIGIN` | 路由到后端的独立无 Cookie 浏览器 origin；必须不同于 app/API origin，并保留 `Host` |
 | 插件 | `MULTICA_PLUGIN_API_URL` | 带版本的插件 Public API 完整 Base URL，例如 `https://plugin-api.example.com/v1`；未设置时使用 `MULTICA_PUBLIC_URL` + `/v1` |
 | 插件 | `MULTICA_PLUGIN_DIR` | 开发时用于发布本地插件包的可选绝对目录 |

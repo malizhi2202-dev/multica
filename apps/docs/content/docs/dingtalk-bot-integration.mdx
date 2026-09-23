@@ -86,7 +86,7 @@ Send `/clear` to keep the current Multica Chat while applying a fresh agent-visi
 
 ## Self-hosting setup
 
-Multica Cloud users can skip this section. A self-hosted deployment must first set a key for encrypting the DingTalk `AppSecret`:
+Multica Cloud users can skip this section, and a self-hosted deployment needs no key of its own either: the stored DingTalk `AppSecret` is encrypted with a 32-byte key that Multica generates on first startup and keeps in its database. Set this key only to bring your own:
 
 ```dotenv
 MULTICA_DINGTALK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -98,7 +98,7 @@ Generate one with:
 openssl rand -base64 32
 ```
 
-Restart the API service, then connect DingTalk. Keep this key permanently: if it is changed or lost, existing tokens cannot be decrypted and the connection must be set up again.
+Restart the API service after setting it, then connect DingTalk. The override covers DingTalk alone. Keep a key you set yourself long-term: if it is changed or lost, the tokens it sealed cannot be decrypted and the connection must be set up again.
 
 Account-linking URLs use `MULTICA_APP_URL`, falling back to `FRONTEND_ORIGIN` when it is unset. The URL must point to a Multica address that members can access.
 

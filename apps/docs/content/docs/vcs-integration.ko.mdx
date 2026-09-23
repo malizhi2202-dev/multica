@@ -6,7 +6,7 @@ description: 워크스페이스마다 자체 호스팅 Forgejo, Gitea, GitLab �
 import { Callout } from "fumadocs-ui/components/callout";
 
 <Callout type="warn">
-**자체 배포한 Multica에서만 사용할 수 있습니다.** 이 연동은 Multica를 **직접 배포해 운영할 때만** 제공되며 Multica Cloud에서는 사용할 수 없습니다. 여기서 "자체 호스팅"은 **Multica 자체를 배포하는 것**을 뜻합니다. 일반적으로 자체 네트워크의 Git 인스턴스에 접근하기 위해 사용합니다. 서버 운영자가 `MULTICA_VCS_INTEGRATION_ENABLED=true`로 기능을 켜고 `MULTICA_VCS_SECRET_KEY`도 설정해야 합니다. 그전에는 설정 → 연동에 이 영역이 표시되지 않습니다.
+**자체 배포한 Multica에서만 사용할 수 있습니다.** 이 연동은 Multica를 **직접 배포해 운영할 때만** 제공되며 Multica Cloud에서는 사용할 수 없습니다. 여기서 "자체 호스팅"은 **Multica 자체를 배포하는 것**을 뜻합니다. 일반적으로 자체 네트워크의 Git 인스턴스에 접근하기 위해 사용합니다. 서버 운영자가 `MULTICA_VCS_INTEGRATION_ENABLED=true`로 기능을 켜야 합니다. 그전에는 설정 → 연동에 이 영역이 표시되지 않습니다.
 </Callout>
 
 Multica는 워크스페이스별로 자체 호스팅 Git 코드 호스팅인 **Forgejo**, **Gitea**, **GitLab** 중 하나에 연결합니다. 연결하면 브랜치 이름이나 제목에 태스크 번호(예: `MUL-123`)가 포함된 Pull Request(GitLab에서는 Merge Request), 또는 본문에서 종료 키워드 바로 뒤에 번호를 적은 PR이 해당 [태스크](/issues)에 **자동으로 연결**되고 태스크 사이드바의 **Pull requests**에 표시됩니다. 종료 키워드가 있는 PR이 merge되면 태스크가 완료로 이동합니다. head commit의 CI는 카드에 check bar로 표시됩니다.
@@ -27,7 +27,7 @@ MULTICA_VCS_INTEGRATION_ENABLED=true
 
 공식 자체 호스팅 `docker compose` 파일(`docker-compose.selfhost.yml`)에는 이미 설정되어 있습니다.
 
-그런 다음 서버가 저장된 자격 증명을 암호화할 수 있도록 base64로 인코딩한 32바이트 키를 설정합니다. 설정하지 않으면 연결 양식을 사용할 수 없습니다.
+서버는 첫 시작 시 자동 생성해 데이터베이스에 저장하는 32바이트 키로 저장된 자격 증명을 암호화하므로, 키를 설정하지 않아도 연결 양식을 사용할 수 있습니다. 자체 키를 쓰려는 경우에만 base64로 인코딩한 32바이트 키를 지정하세요.
 
 ```sh
 openssl rand -base64 32
@@ -37,7 +37,7 @@ openssl rand -base64 32
 MULTICA_VCS_SECRET_KEY=<base64 32바이트 키>
 ```
 
-두 값이 모두 필요합니다. 스위치는 기능을 제공할지 결정하고 키는 저장된 token과 Webhook secret을 암호화합니다. 연결, Webhook, 교체 모두 두 설정을 함께 요구합니다.
+스위치는 기능을 제공할지 결정합니다. 키는 이 연동에서 자동 생성된 키를 대체하는 용도일 뿐이며, 연결·Webhook·교체는 최종적으로 정해진 키를 사용합니다. 자체 키를 지정했다면 계속 보관하세요. 그 키를 교체하거나 잃으면 그 키로 암호화한 자격 증명을 복호화할 수 없습니다.
 
 `MULTICA_PUBLIC_URL`을 서버의 공개 base URL로 설정하면 Multica가 바로 붙여 넣을 수 있는 Webhook URL을 표시합니다. 설정하지 않으면 화면에 Webhook 경로만 표시되므로 origin을 직접 앞에 붙여야 합니다.
 

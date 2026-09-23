@@ -140,8 +140,9 @@ backend:
     # telemetry collection and delivery.
     doNotTrack: ""
     # Self-host-only VCS integration (Forgejo / Gitea / GitLab). The official
-    # chart enables the product surface by default; operators must also provide
-    # MULTICA_VCS_SECRET_KEY through existingSecret before connections work.
+    # chart enables the product surface by default. Operators may also provide
+    # MULTICA_VCS_SECRET_KEY through existingSecret, as an optional override of
+    # the encryption key the backend generates on first startup.
     # Set false to hide and reject the integration for this deployment.
     vcsIntegrationEnabled: true
     # Managed multica-cloud connection. Empty keeps self-hosting independent.

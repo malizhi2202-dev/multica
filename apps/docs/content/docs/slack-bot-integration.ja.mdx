@@ -167,7 +167,7 @@ Bot との DM で `/clear` を送ると、現在の Multica Chat はそのまま
 
 ## セルフホスト設定
 
-Multica Cloud では追加設定は不要です。セルフホスト環境では、Slack token を暗号化するキーを先に設定してください。
+Multica Cloud では追加設定は不要で、セルフホスト環境でも同様です。保存された Slack token は、サーバーが初回起動時に自動生成してデータベースに保管する 32 バイトのキーで暗号化されます。自分のキーを指定したい場合のみ設定してください。
 
 ```dotenv
 MULTICA_SLACK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -179,7 +179,7 @@ MULTICA_SLACK_SECRET_KEY=<base64-encoded 32-byte key>
 openssl rand -base64 32
 ```
 
-API サービスを再起動してから Slack app を接続します。このキーは継続して保管してください。変更または紛失すると既存の token を復号できなくなり、app の再接続が必要になります。
+設定後は API サービスを再起動してから Slack app を接続します。このキーが適用されるのは Slack だけです。自分で設定したキーは継続して保管してください。変更または紛失すると、そのキーで暗号化した token を復号できなくなり、app の再接続が必要になります。
 
 アカウント連携用リンクには `MULTICA_APP_URL` が使われ、未設定の場合は `FRONTEND_ORIGIN` にフォールバックします。メンバーがアクセスできる Multica のアドレスを指定してください。
 

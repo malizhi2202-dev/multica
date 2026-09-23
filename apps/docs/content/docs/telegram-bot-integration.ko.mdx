@@ -56,13 +56,13 @@ Bot은 Telegram 메시지를 보내고 편집해 텍스트 응답을 스트리�
 
 **Settings → Integrations → Telegram**에서 연결된 Bot을 확인할 수 있습니다. owner와 admin은 연결을 해제할 수 있으며, 기존 대화와 감사 기록은 유지됩니다.
 
-자체 호스팅 환경에서는 API 서버 시작 전에 고정된 32-byte 암호화 키를 설정합니다.
+Multica는 첫 시작 시 32바이트 암호화 키를 자동 생성해 데이터베이스에 저장하고, 저장된 Bot token을 이 키로 암호화하므로 자체 호스팅 환경에서 별도 키를 준비할 필요가 없습니다. 자체 키를 쓰려는 경우에만 지정하세요.
 
 ```dotenv
 MULTICA_TELEGRAM_SECRET_KEY=<base64-encoded 32-byte key>
 ```
 
-`openssl rand -base64 32`로 생성할 수 있습니다. 바인딩 링크는 `MULTICA_APP_URL`을 사용하며, 없으면 `FRONTEND_ORIGIN`으로 대체합니다. 서버는 `api.telegram.org`에 HTTPS로 접속할 수 있어야 하며 표준 `HTTPS_PROXY` / `NO_PROXY`를 사용할 수 있습니다.
+`openssl rand -base64 32`로 생성할 수 있습니다. 이 키는 Telegram에만 적용되며, 직접 설정한 키는 장기간 보관해야 합니다. 바인딩 링크는 `MULTICA_APP_URL`을 사용하며, 없으면 `FRONTEND_ORIGIN`으로 대체합니다. 서버는 `api.telegram.org`에 HTTPS로 접속할 수 있어야 하며 표준 `HTTPS_PROXY` / `NO_PROXY`를 사용할 수 있습니다.
 
 ## 문제 해결
 

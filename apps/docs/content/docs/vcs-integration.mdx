@@ -9,9 +9,8 @@ import { Callout } from "fumadocs-ui/components/callout";
 **Self-hosted Multica only.** This integration is available only when you run
 Multica yourself; it is not offered on Multica Cloud. "Self-hosted" here means
 **Multica** is self-hosted — typically so it can reach a Git instance on your own
-network. A server operator must enable it (`MULTICA_VCS_INTEGRATION_ENABLED=true`)
-and set `MULTICA_VCS_SECRET_KEY`; until then the section does not appear in
-Settings → Integrations.
+network. A server operator must enable it (`MULTICA_VCS_INTEGRATION_ENABLED=true`);
+until then the section does not appear in Settings → Integrations.
 </Callout>
 
 Multica connects to a self-hosted Git provider per workspace: **Forgejo**, **Gitea**, or **GitLab**. Once connected, any pull request (GitLab: merge request) whose branch name or title contains an issue identifier (for example `MUL-123`), or whose body names one after a closing keyword (`Closes MUL-123`), is **auto-linked** to that [issue](/issues), appears under **Pull requests** in the issue sidebar, and — when merged with a closing keyword — moves the issue to **Done**. CI for the head commit shows as a checks bar on the card.
@@ -32,7 +31,7 @@ MULTICA_VCS_INTEGRATION_ENABLED=true
 
 The official self-hosted `docker compose` file (`docker-compose.selfhost.yml`) sets this for you.
 
-Then set a base64-encoded 32-byte key so the server can encrypt stored credentials. Without it, the connect form is disabled.
+The server encrypts stored credentials with a 32-byte key that it generates on first startup and keeps in the database, so no key setup is needed before the connect form works. Set one only to bring your own key:
 
 ```sh
 openssl rand -base64 32
@@ -42,7 +41,7 @@ openssl rand -base64 32
 MULTICA_VCS_SECRET_KEY=<base64 32-byte key>
 ```
 
-Both are required: the switch decides whether the feature is offered, and the key encrypts the stored token and webhook secret. Connect, webhook, and rotate all require both.
+The switch decides whether the feature is offered. `MULTICA_VCS_SECRET_KEY` only replaces the generated key for this integration, and connect, webhook, and rotation use whichever key the deployment resolves — so keep a key you bring long-term: credentials sealed with a replaced or lost key can no longer be decrypted.
 
 Set `MULTICA_PUBLIC_URL` to the server's public base URL so Multica can show a ready-to-paste webhook URL. Without it, the UI shows only the webhook path and you prepend your own origin.
 

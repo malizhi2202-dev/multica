@@ -167,7 +167,7 @@ Bot과의 DM에서 `/clear`를 보내면 현재 Multica Chat은 유지되고 에
 
 ## 자체 호스팅 설정
 
-Multica Cloud에는 추가 설정이 필요 없습니다. 자체 호스팅 환경에서는 Slack token 암호화에 사용할 키를 먼저 설정해야 합니다.
+Multica Cloud에는 추가 설정이 필요 없고, 자체 호스팅도 마찬가지입니다. 저장된 Slack token은 서버가 첫 시작 시 자동 생성해 데이터베이스에 저장하는 32바이트 키로 암호화됩니다. 자체 키를 쓰려는 경우에만 지정하세요.
 
 ```dotenv
 MULTICA_SLACK_SECRET_KEY=<base64로 인코딩한 32바이트 키>
@@ -179,7 +179,7 @@ MULTICA_SLACK_SECRET_KEY=<base64로 인코딩한 32바이트 키>
 openssl rand -base64 32
 ```
 
-API 서비스를 다시 시작한 뒤 Slack app을 연결하세요. 이 키는 장기간 보관해야 합니다. 키를 바꾸거나 잃어버리면 기존 token을 복호화할 수 없으므로 다시 연결해야 합니다.
+지정한 뒤 API 서비스를 다시 시작하고 Slack app을 연결하세요. 이 키는 Slack에만 적용됩니다. 직접 설정한 키는 장기간 보관해야 합니다. 키를 바꾸거나 잃어버리면 그 키로 암호화한 token을 복호화할 수 없으므로 다시 연결해야 합니다.
 
 계정 연결 링크는 `MULTICA_APP_URL`을 사용하고, 설정되지 않으면 `FRONTEND_ORIGIN`을 사용합니다. 멤버가 접근할 수 있는 Multica 주소를 지정해야 합니다.
 

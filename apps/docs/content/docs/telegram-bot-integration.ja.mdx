@@ -56,13 +56,13 @@ Bot は Telegram メッセージを送信・編集してテキストをストリ
 
 **Settings → Integrations → Telegram** で接続済み Bot を確認できます。owner と admin は接続を解除できます。会話と監査履歴は保持されます。
 
-セルフホスト環境では、API 起動前に固定の 32-byte 暗号鍵を設定します。
+Multica は初回起動時に 32 バイトの暗号化キーを自動生成してデータベースに保管し、保存された Bot token はそのキーで暗号化されるため、セルフホスト環境で独自にキーを用意する必要はありません。自分のキーを指定したい場合のみ設定してください。
 
 ```dotenv
 MULTICA_TELEGRAM_SECRET_KEY=<base64-encoded 32-byte key>
 ```
 
-`openssl rand -base64 32` で生成できます。連携リンクは `MULTICA_APP_URL`（未設定時は `FRONTEND_ORIGIN`）を使用します。サーバーから `api.telegram.org` への HTTPS 接続も必要で、標準の `HTTPS_PROXY` / `NO_PROXY` を利用できます。
+`openssl rand -base64 32` で生成できます。このキーが適用されるのは Telegram だけで、自分で設定したキーは継続して保管する必要があります。連携リンクは `MULTICA_APP_URL`（未設定時は `FRONTEND_ORIGIN`）を使用します。サーバーから `api.telegram.org` への HTTPS 接続も必要で、標準の `HTTPS_PROXY` / `NO_PROXY` を利用できます。
 
 ## トラブルシューティング
 

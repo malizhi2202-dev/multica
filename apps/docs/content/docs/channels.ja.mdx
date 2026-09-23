@@ -86,7 +86,7 @@ Multica がエージェントを実行するのは、アカウント連携が完
 
 ## セルフホスト
 
-セルフホスト環境では、Multica が接続エンドポイントを有効にする前に、プラットフォームごとに 32 バイトの暗号化キーを設定する必要があります。
+Multica は初回起動時に 32 バイトの暗号化キーを自動生成してデータベースに保存し、保存された Bot の認証情報はそのキーで暗号化されるため、接続エンドポイントを使うために事前の設定は不要です。自分のキーを使いたい場合のみ、以下を設定してください。
 
 ```dotenv
 MULTICA_LARK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -96,7 +96,7 @@ MULTICA_WECOM_SECRET_KEY=<base64-encoded 32-byte key>
 MULTICA_TELEGRAM_SECRET_KEY=<base64-encoded 32-byte key>
 ```
 
-これらのキーは、保存された Bot の認証情報を暗号化します。生成、保管、ローテーションの方法は[環境変数](/environment-variables)を参照してください。Multica Cloud ではすでに設定済みです。
+各キーは対象プラットフォームのキーだけを置き換え、未設定の他のプラットフォームには影響しません。生成、保管、ローテーションの方法は[環境変数](/environment-variables)を参照してください。Multica Cloud ではすでに設定済みです。
 
 WeCom の送信経路は、1 つのプロセスが保持する WebSocket だけです。**別のレプリカ**で生成された返信がどうなるかは、リアルタイムリレーのモードによって決まります。
 

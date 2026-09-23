@@ -64,7 +64,7 @@ After disconnecting, the Bot stops receiving new messages. Existing conversation
 
 ## Self-hosting setup
 
-Multica Cloud needs no extra configuration. A self-hosted deployment must first set a key used to encrypt Bot credentials:
+Multica Cloud needs no extra configuration, and neither does a self-hosted deployment: stored Bot credentials are encrypted with a 32-byte key that the server generates on first startup and keeps in its database. Set this key only to bring your own:
 
 ```dotenv
 MULTICA_LARK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -76,13 +76,13 @@ Generate one like this:
 openssl rand -base64 32
 ```
 
-Restart the API server, then connect the Bot from the agent's **Integrations** page. Keep this key long-term: if it is rotated or lost, existing credentials can no longer be decrypted and the Bot must be reconnected.
+Restart the API server after setting it, then connect the Bot from the agent's **Integrations** page. The override covers Lark alone. Keep a key you set yourself long-term: if it is rotated or lost, the credentials it sealed can no longer be decrypted and the Bot must be reconnected.
 
 `MULTICA_LARK_HTTP_BASE_URL` and `MULTICA_LARK_CALLBACK_BASE_URL` exist only for special deployments such as proxies and testing; leave them unset in normal operation.
 
 ## Troubleshooting
 
-- **No bind button**: confirm the current account is the agent's owner or a workspace owner or admin, and check that the self-hosting key is configured.
+- **No bind button**: confirm the current account is the agent's owner or a workspace owner or admin.
 - **QR code expired**: close the dialog and start the connection again.
 - **The Bot asks for account binding**: open the binding link and sign in with the Multica account for that workspace.
 - **The Bot doesn't run**: check whether the agent is archived and whether the [runtime](/daemon-runtimes) it uses is online.

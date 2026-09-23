@@ -86,7 +86,7 @@ Slack DM에서는 `/new`과 `/clear`가 네이티브 slash 명령입니다. 네�
 
 ## 자체 호스팅
 
-자체 호스팅 환경에서는 해당 플랫폼에 32바이트 암호화 키를 먼저 설정해야 Multica에 연결 메뉴가 열립니다.
+Multica는 첫 시작 시 32바이트 암호화 키를 자동 생성해 데이터베이스에 저장하고, 저장된 Bot 자격 증명을 이 키로 암호화하므로 연결 메뉴가 열리기 전에 미리 설정할 것은 없습니다. 자체 키를 쓰려는 경우에만 아래를 지정하세요.
 
 ```dotenv
 MULTICA_LARK_SECRET_KEY=<base64로 인코딩한 32바이트 키>
@@ -96,7 +96,7 @@ MULTICA_WECOM_SECRET_KEY=<base64로 인코딩한 32바이트 키>
 MULTICA_TELEGRAM_SECRET_KEY=<base64로 인코딩한 32바이트 키>
 ```
 
-이 키는 Bot 자격 증명을 암호화해 저장하는 데 사용됩니다. 생성, 보관, 교체 방법은 [환경 변수](/environment-variables)를 참고하세요. Multica Cloud에는 이미 설정되어 있습니다.
+각 키는 해당 플랫폼의 키만 대체하며, 설정하지 않은 다른 플랫폼에는 영향이 없습니다. 생성, 보관, 교체 방법은 [환경 변수](/environment-variables)를 참고하세요. Multica Cloud에는 이미 설정되어 있습니다.
 
 WeCom의 발신 경로는 한 프로세스가 보유한 WebSocket뿐입니다. **다른 레플리카**에서 생성된 응답이 어떻게 되는지는 실시간 릴레이 모드에 따라 달라집니다.
 

@@ -86,7 +86,7 @@ Multica 收到钉钉消息后，会尝试在用户原消息上添加钉钉的`�
 
 ## 自部署配置
 
-Multica Cloud 用户可跳过本节。自托管部署需要先设置一个用于加密钉钉 `AppSecret` 的密钥：
+Multica Cloud 用户可跳过本节。自托管部署也不需要自己准备密钥：已保存的钉钉 `AppSecret` 由 Multica 在首次启动时自动生成的 32 字节密钥加密，该密钥保存在数据库中。只有想自带密钥时才需要设置：
 
 ```dotenv
 MULTICA_DINGTALK_SECRET_KEY=<base64-encoded 32-byte key>
@@ -98,7 +98,7 @@ MULTICA_DINGTALK_SECRET_KEY=<base64-encoded 32-byte key>
 openssl rand -base64 32
 ```
 
-重启 API 服务后，再连接钉钉。该密钥需要长期保存：更换或丢失后，已有 token 无法解密，需要重新连接。
+设置后重启 API 服务，再连接钉钉。该覆盖只作用于钉钉这一家。自己设置的密钥需要长期保存：更换或丢失后，用它加密的 token 无法解密，需要重新连接。
 
 账号绑定链接使用 `MULTICA_APP_URL`，未设置时回退到 `FRONTEND_ORIGIN`；它需要指向成员可以访问的 Multica 地址。
 

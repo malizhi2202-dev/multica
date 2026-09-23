@@ -173,21 +173,23 @@ allowlist の正確な判定順序は[ログインとサインアップ](/auth-s
 
 ## 外部連携
 
+Multica は初回起動時に 32 バイトの認証情報暗号化キーを自動生成してデータベースに保存するため、以下の `MULTICA_*_SECRET_KEY` はいずれも任意のオーバーライドです。自分のキーを指定したい場合だけ設定してください。各キーは対象の連携にのみ影響します。
+
 | 連携 | 変数 | 説明 |
 |---|---|---|
 | GitHub | `GITHUB_APP_SLUG` | GitHub App の slug |
 | GitHub | `GITHUB_WEBHOOK_SECRET` | Webhook HMAC と接続 state の署名シークレット |
 | GitHub | `GITHUB_APP_ID` | PR カードの CI ステータス・マージ可否と「GitHub から選択」リポジトリに必要です |
 | GitHub | `GITHUB_APP_PRIVATE_KEY` | App ID と対になる完全な PEM 秘密鍵。用途は同上 |
-| Lark | `MULTICA_LARK_SECRET_KEY` | base64 エンコードされた 32 バイトの資格情報暗号化キー |
-| Slack | `MULTICA_SLACK_SECRET_KEY` | base64 エンコードされた 32 バイトの token 暗号化キー |
-| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | base64 エンコードされた 32 バイトの Bot token 暗号化キー |
+| Lark | `MULTICA_LARK_SECRET_KEY` | Lark の base64 エンコードされた 32 バイトの資格情報暗号化キー（任意のオーバーライド） |
+| Slack | `MULTICA_SLACK_SECRET_KEY` | Slack の base64 エンコードされた 32 バイトの token 暗号化キー（任意のオーバーライド） |
+| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | Telegram の base64 エンコードされた 32 バイトの Bot token 暗号化キー（任意のオーバーライド） |
 | Composio | `COMPOSIO_API_KEY` | Composio ツール接続を有効化 |
 | Composio | `COMPOSIO_CALLBACK_BASE_URL` | コールバック API アドレス。`MULTICA_PUBLIC_URL` にフォールバック可能 |
 | Composio | `COMPOSIO_STATE_SECRET` | OAuth state の署名シークレット。`JWT_SECRET` から派生可能 |
 | セルフホスト Git | `MULTICA_VCS_INTEGRATION_ENABLED` | Forgejo/Gitea/GitLab 連携のスイッチ。compose ではデフォルトで有効 |
-| セルフホスト Git | `MULTICA_VCS_SECRET_KEY` | base64 エンコードされた 32 バイトの暗号化キー（`openssl rand -base64 32`）。未設定の場合、この機能全体が利用できません |
-| Plugins | `MULTICA_PLUGIN_SECRET_KEY` | 保存済み secret と surface 起動 URL を暗号化する base64 形式の 32 バイト鍵 |
+| セルフホスト Git | `MULTICA_VCS_SECRET_KEY` | base64 エンコードされた 32 バイトの暗号化キー（`openssl rand -base64 32`）の任意のオーバーライド。機能の提供可否は上のスイッチが決めます |
+| Plugins | `MULTICA_PLUGIN_SECRET_KEY` | 保存済み secret と surface 起動 URL を暗号化する base64 形式の 32 バイト鍵。Plugin だけ別鍵にしたい場合に設定します（任意） |
 | Plugins | `MULTICA_PLUGIN_SURFACE_ORIGIN` | バックエンドへルーティングする Cookie なしの専用 origin。app/API origin と分離し、`Host` を保持すること |
 | Plugins | `MULTICA_PLUGIN_API_URL` | バージョンを含む Plugin Public API の完全な Base URL（例: `https://plugin-api.example.com/v1`）。未設定時は `MULTICA_PUBLIC_URL` + `/v1` |
 | Plugins | `MULTICA_PLUGIN_DIR` | 開発時にローカル plugin bundle を公開するための任意の絶対ディレクトリ |

@@ -173,21 +173,23 @@ The auth rate limits require `REDIS_URL`; without it, the startup log notes that
 
 ## External integrations
 
+Multica generates its 32-byte credential-encryption key on first startup and stores it in the database, so each `MULTICA_*_SECRET_KEY` below is an optional override: set it only to bring your own key, and it applies to that integration alone.
+
 | Integration | Variable | Description |
 |---|---|---|
 | GitHub | `GITHUB_APP_SLUG` | GitHub App slug |
 | GitHub | `GITHUB_WEBHOOK_SECRET` | Webhook HMAC and connect-state signing secret |
 | GitHub | `GITHUB_APP_ID` | Needed for CI status and mergeability on PR cards and the "pick from GitHub" repository picker |
 | GitHub | `GITHUB_APP_PRIVATE_KEY` | Full PEM private key paired with the App ID; same uses as above |
-| Lark | `MULTICA_LARK_SECRET_KEY` | Base64-encoded 32-byte credential encryption key |
-| Slack | `MULTICA_SLACK_SECRET_KEY` | Base64-encoded 32-byte token encryption key |
-| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | Base64-encoded 32-byte Bot token encryption key |
+| Lark | `MULTICA_LARK_SECRET_KEY` | Optional override of Lark's Base64-encoded 32-byte credential encryption key |
+| Slack | `MULTICA_SLACK_SECRET_KEY` | Optional override of Slack's Base64-encoded 32-byte token encryption key |
+| Telegram | `MULTICA_TELEGRAM_SECRET_KEY` | Optional override of Telegram's Base64-encoded 32-byte Bot token encryption key |
 | Composio | `COMPOSIO_API_KEY` | Enables Composio tool connections |
 | Composio | `COMPOSIO_CALLBACK_BASE_URL` | Callback API URL; can fall back to `MULTICA_PUBLIC_URL` |
 | Composio | `COMPOSIO_STATE_SECRET` | OAuth state signing secret; can be derived from `JWT_SECRET` |
 | Self-hosted Git | `MULTICA_VCS_INTEGRATION_ENABLED` | Forgejo/Gitea/GitLab integration switch; enabled by default in compose |
-| Self-hosted Git | `MULTICA_VCS_SECRET_KEY` | Base64-encoded 32-byte encryption key (`openssl rand -base64 32`); the feature is entirely unavailable without it |
-| Plugins | `MULTICA_PLUGIN_SECRET_KEY` | Base64-encoded 32-byte key for stored secrets and encrypted surface launch URLs |
+| Self-hosted Git | `MULTICA_VCS_SECRET_KEY` | Optional Base64-encoded 32-byte encryption key override (`openssl rand -base64 32`); the switch above, not this key, decides whether the feature is offered |
+| Plugins | `MULTICA_PLUGIN_SECRET_KEY` | Optional Base64-encoded 32-byte key for stored secrets and encrypted surface launch URLs; set it to keep Plugin secrets on their own key |
 | Plugins | `MULTICA_PLUGIN_SURFACE_ORIGIN` | Dedicated cookie-free browser origin routed to this backend; must differ from app/API origins and preserve `Host` |
 | Plugins | `MULTICA_PLUGIN_API_URL` | Complete versioned Plugin Public API base URL, such as `https://plugin-api.example.com/v1`; falls back to `MULTICA_PUBLIC_URL` + `/v1` |
 | Plugins | `MULTICA_PLUGIN_DIR` | Optional absolute directory used to publish local plugin bundles during development |
