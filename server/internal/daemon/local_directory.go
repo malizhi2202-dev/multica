@@ -8,9 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/multica-ai/multica/server/internal/localpath"
 )
 
 // localDirectoryResourceType is the project_resource discriminator the daemon
@@ -268,7 +269,7 @@ func validateLocalPath(absPath string) error {
 	if !filepath.IsAbs(absPath) {
 		return fmt.Errorf("local_directory: local_path must be absolute, got %q", absPath)
 	}
-	if reason, blocked := isBlacklistedLocalPath(absPath); blocked {
+	if reason, blocked := localpath.IsBlacklisted(absPath); blocked {
 		return fmt.Errorf("local_directory: %s (%q)", reason, absPath)
 	}
 	info, err := os.Stat(absPath)
@@ -301,7 +302,7 @@ func validateLocalPath(absPath string) error {
 		return fmt.Errorf("local_directory: resolve symlinks for %q: %w", absPath, err)
 	}
 	realPath = filepath.Clean(realPath)
-	if reason, blocked := isBlacklistedRealPath(realPath); blocked {
+	if reason, blocked := localpath.IsBlacklistedRealPath(realPath); blocked {
 		if realPath != filepath.Clean(absPath) {
 			return fmt.Errorf("local_directory: %s (symlink target of %q is %q)", reason, absPath, realPath)
 		}
@@ -313,110 +314,11 @@ func validateLocalPath(absPath string) error {
 	return nil
 }
 
-// isBlacklistedLocalPath rejects paths that map to the whole machine or an
-// entire user profile. The intent is to keep the daemon from accidentally
-// stamping context files (.agent_context/, .claude/skills/, .multica/) at
-// the root of a user's account or the OS — a misconfiguration on the UI
-// side should fail fast rather than litter the user's home.
-//
-// The check is by literal equality after Clean(), not prefix containment:
-// a legitimate project under /Users/<user>/code/proj should pass.
-func isBlacklistedLocalPath(absPath string) (reason string, blocked bool) {
-	cleaned := filepath.Clean(absPath)
-	if isDriveRoot(cleaned) {
-		return fmt.Sprintf("path is a drive root %q", cleaned), true
-	}
-	for _, banned := range systemRootBlacklist() {
-		if cleaned == banned {
-			return fmt.Sprintf("path is a protected system root %q", banned), true
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		if cleaned == filepath.Clean(home) {
-			return "path is the user's home directory", true
-		}
-	}
-	return "", false
-}
-
-// isBlacklistedRealPath is the canonical-aware variant of
-// isBlacklistedLocalPath. It compares the symlink-resolved realPath against
-// the symlink-resolved form of each blacklist entry so OS-level redirects
-// (notably macOS's /etc -> /private/etc, /tmp -> /private/tmp, /var ->
-// /private/var) cannot be used to slip a candidate past the literal
-// blacklist — whether the redirect is reached via a user-created symlink
-// (~/proj/home-link -> /Users/me) or by directly typing the canonical form
-// (/private/tmp), which is identical to the OS view of /tmp.
-func isBlacklistedRealPath(realPath string) (reason string, blocked bool) {
-	realClean := filepath.Clean(realPath)
-	if isDriveRoot(realClean) {
-		return fmt.Sprintf("path is a drive root %q", realClean), true
-	}
-	for _, banned := range systemRootBlacklist() {
-		bannedClean := filepath.Clean(banned)
-		if realClean == bannedClean {
-			return fmt.Sprintf("path is a protected system root %q", banned), true
-		}
-		if r, err := filepath.EvalSymlinks(banned); err == nil {
-			if filepath.Clean(r) == realClean {
-				return fmt.Sprintf("path is a protected system root %q", banned), true
-			}
-		}
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		homeClean := filepath.Clean(home)
-		if realClean == homeClean {
-			return "path is the user's home directory", true
-		}
-		if r, err := filepath.EvalSymlinks(home); err == nil {
-			if filepath.Clean(r) == realClean {
-				return "path is the user's home directory", true
-			}
-		}
-	}
-	return "", false
-}
-
-// isDriveRoot reports whether absPath is the root of a Windows volume — any
-// of `C:\`, `D:\`, ..., `Z:\`, plus less common cases like `\\server\share`
-// (filepath.VolumeName treats UNC roots as volumes too). On non-Windows
-// this is always false because POSIX has no concept of drive letters and
-// `/` is covered by systemRootBlacklist.
-//
-// We rely on filepath.VolumeName rather than enumerating drive letters
-// statically: removable / network drives can be mounted at any letter
-// (`G:\`, `H:\`, ...), and Windows installs are increasingly happy to put
-// the user profile on a non-C drive. A static list (C..F) would miss them
-// all.
-func isDriveRoot(absPath string) bool {
-	if runtime.GOOS != "windows" {
-		return false
-	}
-	vol := filepath.VolumeName(absPath)
-	if vol == "" {
-		return false
-	}
-	// VolumeName returns the volume without trailing separator (`C:` or
-	// `\\srv\share`). A drive root is volume + one separator (or, after
-	// filepath.Clean, just the volume on bare-volume input).
-	rest := absPath[len(vol):]
-	return rest == "" || rest == `\` || rest == "/"
-}
-
-// systemRootBlacklist returns the per-OS list of paths the daemon never
-// allows as a local_directory root. POSIX systems get `/`, `/Users`, `/home`
-// (and macOS's `/Users/Shared` for good measure); Windows gets the
-// well-known account / shared trees under C:. Drive roots themselves are
-// handled by isDriveRoot so we don't have to enumerate G:\, H:\, etc.
-// The list is intentionally conservative — it errs on the side of
-// rejecting more, since the desktop UI is expected to surface a friendly
-// picker that never produces these values.
-func systemRootBlacklist() []string {
-	if runtime.GOOS == "windows" {
-		return []string{`C:\Users`, `C:\ProgramData`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\Windows`}
-	}
-	return []string{"/", "/Users", "/Users/Shared", "/home", "/root", "/var", "/etc", "/tmp", "/usr", "/opt"}
-}
+// isBlacklistedLocalPath and isBlacklistedRealPath are thin call sites into
+// the shared localpath package — the single source of truth for the
+// blacklist rules the daemon and the server-side directory browser must
+// agree on. The "local_directory: " message prefix is prepended by the
+// callers below, as before.
 
 // checkDirReadWrite verifies the daemon process can both read directory
 // contents and create/remove a probe file inside dir. The probe filename is
