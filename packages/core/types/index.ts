@@ -249,12 +249,18 @@ export type {
 } from "./wecom";
 export type {
   TuituiInstallation,
+  TuituiAllowlistMode,
   ListTuituiInstallationsResponse,
   TuituiGroupBot,
   TuituiGroup,
   ListTuituiGroupsResponse,
   ListTuituiGroupsParams,
+  TuituiRejection,
+  TuituiRejectionKind,
+  ListTuituiRejectionsResponse,
+  ListTuituiRejectionsParams,
   RegisterTuituiBYORequest,
+  UpdateTuituiAllowlistsRequest,
   RedeemTuituiBindingTokenResponse,
 } from "./tuitui";
 export type {

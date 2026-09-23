@@ -44,6 +44,7 @@ import type {
   TuituiInstallation,
   ListTuituiInstallationsResponse,
   ListTuituiGroupsResponse,
+  ListTuituiRejectionsResponse,
   RedeemTuituiBindingTokenResponse,
   TelegramInstallation,
   ListTelegramInstallationsResponse,
@@ -3243,6 +3244,17 @@ export const TuituiInstallationSchema = z.object({
   host: z.string().catch("").default(""),
   port: z.number().int().nonnegative().catch(0).default(0),
   bound_tuitui_user_ids: z.array(z.string()).catch([]).default([]),
+  // The effective inbound gates, echoed as a (mode, ids) pair instead of one
+  // list because "not configured" and "explicitly nobody" must not collapse
+  // into each other: the panel prefills `*` for the former and an empty box for
+  // the latter. Anything but the literal "allowlist" reads as unrestricted —
+  // the same way the connection reads a stored row it cannot turn into a list —
+  // so a server predating the feature (both fields absent) displays truthfully
+  // instead of presenting a bot that answers everyone as closed.
+  allow_from_mode: z.string().catch("").default(""),
+  allow_from: z.array(z.string()).catch([]).default([]),
+  group_allow_from_mode: z.string().catch("").default(""),
+  group_allow_from: z.array(z.string()).catch([]).default([]),
 }).loose();
 
 export const EMPTY_TUITUI_INSTALLATION: TuituiInstallation = {
@@ -3257,6 +3269,10 @@ export const EMPTY_TUITUI_INSTALLATION: TuituiInstallation = {
   host: "",
   port: 0,
   bound_tuitui_user_ids: [],
+  allow_from_mode: "",
+  allow_from: [],
+  group_allow_from_mode: "",
+  group_allow_from: [],
 };
 
 export const ListTuituiInstallationsResponseSchema = z.object({
@@ -3295,6 +3311,30 @@ export const ListTuituiGroupsResponseSchema = z.object({
 export const EMPTY_LIST_TUITUI_GROUPS_RESPONSE: ListTuituiGroupsResponse = {
   groups: [],
   group_discovery_supported: false,
+};
+
+// Subjects a Tuitui bot refused because no allowlist named them. `count`
+// defaults to 1, not 0: a torn read still describes a refusal that happened, and
+// a zero would render as "nobody ever tried". An unusable `kind` falls back to
+// "group" on purpose — clicking a chip appends the id to that box, and a group
+// entry can only ever fail to match, while a user entry placed in the wrong list
+// would open the bot's direct messages to that account.
+export const TuituiRejectionSchema = z.object({
+  id: z.string(),
+  kind: z.string().catch("group").default("group"),
+  installation_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  count: z.number().int().nonnegative().catch(1).default(1),
+  last_seen_at: z.string().default(""),
+}).loose();
+
+export const ListTuituiRejectionsResponseSchema = z.object({
+  rejections: z.array(TuituiRejectionSchema).catch([]).default([]),
+  next_offset: z.number().int().nonnegative().optional(),
+}).loose();
+
+export const EMPTY_LIST_TUITUI_REJECTIONS_RESPONSE: ListTuituiRejectionsResponse = {
+  rejections: [],
 };
 
 export const RedeemTuituiBindingTokenResponseSchema = z.object({

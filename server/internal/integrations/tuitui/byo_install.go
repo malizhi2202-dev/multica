@@ -80,7 +80,11 @@ func (s *InstallService) RegisterBYO(ctx context.Context, p RegisterBYOParams) (
 	// reads (config->>'host' / config->>'port'; Port 0 omits the key and
 	// FromInstallConfig fills DefaultPort). MaxMessageLength / ReactionEmoji
 	// stay unset: FromInstallConfig fills the platform defaults, so the row
-	// records only what the user chose.
+	// records only what the user chose. The inbound allowlists are deliberately
+	// absent here: a fresh connection starts unrestricted, exactly as every
+	// existing row behaves, and the gate is written only by the dedicated
+	// allowlist update (see allowlists.go), which stores an explicit [] for a
+	// list the operator cleared.
 	cfgJSON, err := json.Marshal(installConfig{
 		AppID:              appID,
 		AppSecretEncrypted: base64.StdEncoding.EncodeToString(sealedSecret),

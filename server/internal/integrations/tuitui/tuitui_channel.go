@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
+	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 )
 
 // tuituiChannel is ONE installation's Tuitui connection: a blocking receive
@@ -19,6 +22,14 @@ type tuituiChannel struct {
 	client  *client
 	handler channel.InboundHandler
 	logger  *slog.Logger
+
+	// instID is the channel_installation row this connection belongs to, and
+	// audit the shared non-content drop auditor. Both exist so an allowlist
+	// refusal can be recorded before the engine ever sees the message; either
+	// may be zero / nil (a channel built for its outbound Send path only, or a
+	// test), in which case refusals are logged and not audited.
+	instID pgtype.UUID
+	audit  engine.Auditor
 
 	// dialer overrides the WebSocket dialer (tests inject a fake socket).
 	dialer wsDialer
@@ -106,9 +117,10 @@ func (c *tuituiChannel) Disconnect(ctx context.Context) error {
 }
 
 // handleFrame processes one acknowledged inbound frame: transient event_id
-// dedup, normalization into channel.InboundMessage, kind bookkeeping, then
-// the shared handler. Drops are logged; the durable dedup / identity gates
-// belong to the engine. The frame has already been acked by the connector.
+// dedup, normalization into channel.InboundMessage, the installation's
+// allowlist, kind bookkeeping, then the shared handler. Drops are logged; the
+// durable dedup / identity gates belong to the engine. The frame has already
+// been acked by the connector.
 func (c *tuituiChannel) handleFrame(ctx context.Context, frame *wsFrame) {
 	eventID := frame.eventID()
 	if eventID != "" && c.seenEvent(eventID) {
@@ -130,6 +142,18 @@ func (c *tuituiChannel) handleFrame(ctx context.Context, frame *wsFrame) {
 	if !ok {
 		c.logger.InfoContext(ctx, "tuitui: dropped inbound event",
 			"event", frame.Body.Event, "event_id", eventID)
+		return
+	}
+	// The installation's allowlist is enforced here, before the engine handler:
+	// a refused sender creates no session, claims no dedup row, queues no run,
+	// and gets no reply of any kind — like the reference bridge client, which
+	// only logs a refusal it decided on. The frame was already acknowledged, so
+	// the gateway stops redelivering it.
+	if !c.cfg.allowsInbound(norm) {
+		subject := allowlistSubjectOf(norm)
+		c.logger.InfoContext(ctx, "tuitui: dropped message outside the allowlist",
+			"event", subject.Kind, "subject", subject.ID, "event_id", eventID)
+		c.recordAllowlistDrop(ctx, norm)
 		return
 	}
 	c.rememberKind(norm.msg.Source.ChatID, norm.kind)
@@ -191,6 +215,10 @@ type ChannelDeps struct {
 	HTTPClient *http.Client
 	// Dialer overrides the WebSocket dialer (tests). Nil uses gorilla.
 	Dialer wsDialer
+	// Audit records non-content inbound drops (the allowlist gate among
+	// them) into channel_inbound_audit, the same engine.Auditor the inbound
+	// ResolverSet uses. Nil keeps refusals log-only.
+	Audit engine.Auditor
 }
 
 // RegisterTuitui registers the per-installation Tuitui Factory so the
@@ -219,6 +247,8 @@ func NewFactory(deps ChannelDeps) channel.Factory {
 			Logger:     logger,
 			HTTPClient: deps.HTTPClient,
 			Dialer:     deps.Dialer,
+			InstID:     cfg.ID,
+			Audit:      deps.Audit,
 		}), nil
 	}
 }
@@ -228,6 +258,11 @@ type ConfigDeps struct {
 	Logger     *slog.Logger
 	HTTPClient *http.Client
 	Dialer     wsDialer
+	// InstID and Audit belong to the allowlist gate: the installation the
+	// refusal is attributed to, and the auditor that records it. Zero / nil
+	// disables the audit write only, never the refusal itself.
+	InstID pgtype.UUID
+	Audit  engine.Auditor
 }
 
 // New assembles a channel from validated credentials — the seam tests use
@@ -243,6 +278,8 @@ func New(cfg Config, handler channel.InboundHandler, deps ConfigDeps) *tuituiCha
 		handler: handler,
 		logger:  logger,
 		dialer:  deps.Dialer,
+		instID:  deps.InstID,
+		audit:   deps.Audit,
 		kinds:   map[string]chatKind{},
 		seenIDs: map[string]struct{}{},
 		seenMru: nil,

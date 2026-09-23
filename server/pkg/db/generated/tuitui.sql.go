@@ -62,6 +62,109 @@ func (q *Queries) ForgetTuituiGroupSession(ctx context.Context, arg ForgetTuitui
 	return i, err
 }
 
+const listTuituiAllowlistRejections = `-- name: ListTuituiAllowlistRejections :many
+SELECT a.channel_chat_id AS subject_id,
+       a.installation_id,
+       ci.agent_id,
+       bool_or(a.event_type = 'single_chat') AS is_direct,
+       count(*)::bigint AS seen_count,
+       max(a.received_at)::timestamptz AS last_seen_at
+FROM channel_inbound_audit a
+JOIN channel_installation ci ON ci.id = a.installation_id
+WHERE a.channel_type = 'tuitui'
+  AND a.drop_reason = $1
+  AND a.channel_chat_id IS NOT NULL
+  AND ci.channel_type = 'tuitui'
+  AND ci.status = 'active'
+  AND ci.workspace_id = $2
+  AND ($3::boolean IS NOT TRUE
+       OR a.installation_id = $4::uuid)
+  -- Offer only what the operator has not already allowed: an audit row records
+  -- the moment of refusal and never expires, so without this the id just added
+  -- would still be on the list and the dialog would read as if the save had not
+  -- taken. The rule mirrors the inbound gate on the same blob — a list that is
+  -- absent or carries the wildcard covers every subject. A conversation can also
+  -- be reached through its sender's personal entry, and the audit row keeps no
+  -- sender, so that route is only recognised here when the personal list is
+  -- unrestricted as a whole.
+  AND NOT (CASE WHEN a.event_type = 'single_chat' THEN
+             jsonb_exists(COALESCE(ci.config -> 'allow_from', '[]'::jsonb), a.channel_chat_id)
+             OR jsonb_exists(COALESCE(ci.config -> 'allow_from', '[]'::jsonb), '*')
+             OR COALESCE(jsonb_typeof(ci.config -> 'allow_from'), 'null') <> 'array'
+           ELSE
+             jsonb_exists(COALESCE(ci.config -> 'group_allow_from', '[]'::jsonb), a.channel_chat_id)
+             OR jsonb_exists(COALESCE(ci.config -> 'group_allow_from', '[]'::jsonb), '*')
+             OR COALESCE(jsonb_typeof(ci.config -> 'group_allow_from'), 'null') <> 'array'
+             OR jsonb_exists(COALESCE(ci.config -> 'allow_from', '[]'::jsonb), '*')
+             OR COALESCE(jsonb_typeof(ci.config -> 'allow_from'), 'null') <> 'array'
+           END)
+GROUP BY a.channel_chat_id, a.installation_id, ci.agent_id
+ORDER BY max(a.received_at) DESC, a.channel_chat_id ASC
+LIMIT $6::int OFFSET $5::int
+`
+
+type ListTuituiAllowlistRejectionsParams struct {
+	DropReason           string      `json:"drop_reason"`
+	WorkspaceID          pgtype.UUID `json:"workspace_id"`
+	FilterByInstallation bool        `json:"filter_by_installation"`
+	InstallationID       pgtype.UUID `json:"installation_id"`
+	RowOffset            int32       `json:"row_offset"`
+	RowLimit             int32       `json:"row_limit"`
+}
+
+type ListTuituiAllowlistRejectionsRow struct {
+	SubjectID      pgtype.Text        `json:"subject_id"`
+	InstallationID pgtype.UUID        `json:"installation_id"`
+	AgentID        pgtype.UUID        `json:"agent_id"`
+	IsDirect       bool               `json:"is_direct"`
+	SeenCount      int64              `json:"seen_count"`
+	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
+}
+
+// The people and conversations this workspace's Tuitui bots refused because
+// none of the bot's allowlists named them, newest first and collapsed to one
+// row per refused subject. channel_inbound_audit is the shared non-content
+// drop audit and carries no workspace column, so the join to
+// channel_installation is what scopes a read to this workspace; the reason
+// label arrives as a parameter so the constant keeps one home in Go.
+// is_direct tells a person (a refused DM, keyed by user account) from a group
+// or teams channel (keyed by the channel-scoped conversation id) — exactly the
+// two lists the Settings panel writes them into. The optional installation
+// filter is how one bot's dialog shows only its own refusals.
+func (q *Queries) ListTuituiAllowlistRejections(ctx context.Context, arg ListTuituiAllowlistRejectionsParams) ([]ListTuituiAllowlistRejectionsRow, error) {
+	rows, err := q.db.Query(ctx, listTuituiAllowlistRejections,
+		arg.DropReason,
+		arg.WorkspaceID,
+		arg.FilterByInstallation,
+		arg.InstallationID,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTuituiAllowlistRejectionsRow{}
+	for rows.Next() {
+		var i ListTuituiAllowlistRejectionsRow
+		if err := rows.Scan(
+			&i.SubjectID,
+			&i.InstallationID,
+			&i.AgentID,
+			&i.IsDirect,
+			&i.SeenCount,
+			&i.LastSeenAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTuituiGroupSessionsByWorkspace = `-- name: ListTuituiGroupSessionsByWorkspace :many
 
 SELECT b.id AS binding_id, b.channel_chat_id, b.installation_id, ci.agent_id,
@@ -172,4 +275,68 @@ func (q *Queries) ListTuituiUserBindingsForMember(ctx context.Context, arg ListT
 		return nil, err
 	}
 	return items, nil
+}
+
+const setTuituiInstallationAllowlists = `-- name: SetTuituiInstallationAllowlists :one
+UPDATE channel_installation
+SET config = config
+      || CASE WHEN $1::jsonb IS NOT NULL
+              THEN jsonb_build_object('allow_from', $1::jsonb)
+              ELSE '{}'::jsonb END
+      || CASE WHEN $2::jsonb IS NOT NULL
+              THEN jsonb_build_object('group_allow_from', $2::jsonb)
+              ELSE '{}'::jsonb END,
+    updated_at = now()
+WHERE id = $3
+  AND workspace_id = $4
+  AND channel_type = 'tuitui'
+RETURNING id, workspace_id, agent_id, channel_type, config, status, ws_lease_token, ws_lease_expires_at, installer_user_id, installed_at, created_at, updated_at
+`
+
+type SetTuituiInstallationAllowlistsParams struct {
+	AllowFrom      []byte      `json:"allow_from"`
+	GroupAllowFrom []byte      `json:"group_allow_from"`
+	ID             pgtype.UUID `json:"id"`
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+}
+
+// Replaces (or, when an argument is NULL, leaves alone) one side of an
+// installation's inbound allowlist, in place.
+//
+// The `config || jsonb_build_object(...)` form is what keeps this safe: jsonb
+// merging carries every other key over untouched — including the sealed
+// app_secret_encrypted, host, port and app_id — so there is no Go-side
+// read-modify-write of the blob. That matters twice over: a Go round trip
+// through a struct would silently drop any key the struct does not declare
+// (which would make an existing bot's credentials undecryptable), and two
+// overlapping writes would each be computed from a stale read and lose the
+// other's key. Here both sides are one atomic UPDATE of one row, so concurrent
+// writes to different keys both land, and concurrent writes to the same key are
+// last-write-wins, which is what editing a form means.
+//
+// NULL means "this request said nothing about this list", distinct from '[]'
+// ("the operator cleared it: nobody") and from '["*"]' ("everyone").
+func (q *Queries) SetTuituiInstallationAllowlists(ctx context.Context, arg SetTuituiInstallationAllowlistsParams) (ChannelInstallation, error) {
+	row := q.db.QueryRow(ctx, setTuituiInstallationAllowlists,
+		arg.AllowFrom,
+		arg.GroupAllowFrom,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i ChannelInstallation
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.AgentID,
+		&i.ChannelType,
+		&i.Config,
+		&i.Status,
+		&i.WsLeaseToken,
+		&i.WsLeaseExpiresAt,
+		&i.InstallerUserID,
+		&i.InstalledAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

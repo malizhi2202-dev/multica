@@ -52,11 +52,17 @@ func NewTuituiResolverSet(q *db.Queries, tx engine.TxStarter, replier engine.Out
 			Fallback: "Tuitui chat",
 		})},
 		Media:      media,
-		Audit:      &auditor{q: q},
+		Audit:      NewAuditor(q),
 		Replier:    replier,
 		OriginType: originTuituiChat,
 	}
 }
+
+// NewAuditor exposes the shared non-content inbound-drop auditor so the
+// wiring layer can hand the same sink to the channel Factory (the allowlist
+// gate audits before the engine ResolverSet ever sees a message). One
+// implementation, one table, one reason vocabulary.
+func NewAuditor(q *db.Queries) engine.Auditor { return &auditor{q: q} }
 
 var (
 	_ engine.InstallationResolver = (*installationResolver)(nil)

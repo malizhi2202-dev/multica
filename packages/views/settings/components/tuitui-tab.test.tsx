@@ -24,6 +24,15 @@ const installationsRef = vi.hoisted(() => ({
     configured: true,
   },
 }));
+// Two pages, chosen by the offset in the query key, so paging and the moment the
+// affordance disappears are both observable.
+type TuituiRejectionsFixture =
+  | { rejections: Array<Record<string, unknown>>; next_offset?: number }
+  | undefined;
+const rejectionsRef = vi.hoisted(() => ({
+  current: undefined as TuituiRejectionsFixture,
+  next: undefined as TuituiRejectionsFixture,
+}));
 const groupsRef = vi.hoisted(() => ({
   current: {
     data: {
@@ -44,6 +53,7 @@ const mutationsRef = vi.hoisted(() => ({
   register: { isPending: false, mutateAsync: vi.fn() },
   disconnect: { isPending: false, mutateAsync: vi.fn() },
   forget: { isPending: false, mutateAsync: vi.fn() },
+  allowlist: { isPending: false, mutateAsync: vi.fn() },
 }));
 const toastRef = vi.hoisted(() => ({
   success: vi.fn(),
@@ -58,6 +68,13 @@ vi.mock("@tanstack/react-query", () => ({
     if (key.includes("members")) return { data: membersRef.current };
     if (key.includes("agents")) return { data: agentsRef.current };
     if (key.includes("groups")) return groupsRef.current;
+    if (key.includes("rejections")) {
+      const offset = opts.queryKey[opts.queryKey.length - 1];
+      return {
+        data: offset === 0 ? rejectionsRef.current : rejectionsRef.next,
+        isLoading: false,
+      };
+    }
     if (key.includes("installations"))
       return { data: installationsRef.current, isLoading: false };
     return { data: undefined, isLoading: false };
@@ -108,9 +125,14 @@ vi.mock("@multica/core/tuitui", () => ({
     queryKey: ["tuitui", wsId, "groups"],
     queryFn: vi.fn(),
   }),
+  tuituiRejectionsOptions: (wsId: string, installationId: string, offset: number) => ({
+    queryKey: ["tuitui", wsId, "rejections", installationId, offset],
+    queryFn: vi.fn(),
+  }),
   useRegisterTuituiBYO: () => mutationsRef.register,
   useDeleteTuituiInstallation: () => mutationsRef.disconnect,
   useForgetTuituiGroup: () => mutationsRef.forget,
+  useUpdateTuituiAllowlists: () => mutationsRef.allowlist,
 }));
 
 vi.mock("sonner", () => ({ toast: toastRef }));
@@ -150,6 +172,9 @@ function resetFixtures() {
   mutationsRef.register = { isPending: false, mutateAsync: vi.fn() };
   mutationsRef.disconnect = { isPending: false, mutateAsync: vi.fn() };
   mutationsRef.forget = { isPending: false, mutateAsync: vi.fn() };
+  mutationsRef.allowlist = { isPending: false, mutateAsync: vi.fn() };
+  rejectionsRef.current = undefined;
+  rejectionsRef.next = undefined;
   configStore.getState().setTuituiSupported(true);
 }
 
@@ -266,6 +291,355 @@ describe("TuituiTab", () => {
     await userEvent.click(screen.getByTestId("tuitui-add-installation"));
     expect(screen.getByTestId("tuitui-byo-app-id").getAttribute("type")).toBe("password");
     expect(screen.getByTestId("tuitui-byo-app-secret").getAttribute("type")).toBe("password");
+  });
+
+  it("summarizes an in-force allowlist on the row, and never an open one", () => {
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: ["alice"],
+          group_allow_from_mode: "unrestricted",
+          group_allow_from: [],
+        },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    // Which gate is in force has to be readable without opening anything: an
+    // empty list and an untouched one look the same everywhere the mode is not
+    // shown beside the entries.
+    expect(screen.getByTestId("tuitui-installation-allowlist")).toHaveTextContent(
+      "1 account can DM it",
+    );
+    // The open side is stated too, so the pair cannot be misread as "nothing is
+    // restricted" when exactly one gate is closed.
+    expect(screen.getByTestId("tuitui-installation-allowlist")).toHaveTextContent(
+      "Any group can trigger it",
+    );
+    expect(screen.queryByTestId("tuitui-allowlist-direct-closed")).toBeNull();
+  });
+
+  it("flags a bot whose cleared list is refusing everyone", () => {
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: [],
+          group_allow_from_mode: "allowlist",
+          group_allow_from: ["778899"],
+        },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    expect(screen.getByTestId("tuitui-allowlist-direct-closed")).toHaveTextContent(
+      "This box is empty: the bot is refusing every direct message.",
+    );
+    expect(screen.getByTestId("tuitui-allowlist-group-listed")).toHaveTextContent(
+      "1 group allowed",
+    );
+  });
+
+  it("hides the allowlist entry point for a revoked bot and a member", async () => {
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        { id: "i1", agent_id: "agent-1", status: "revoked", installed_at: "" },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    // A revoked bot is not connected, so its gate decides nothing and the write
+    // would be refused.
+    expect(screen.queryByTestId("tuitui-installation-allowlist-edit")).toBeNull();
+
+    cleanup();
+    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    installationsRef.current = {
+      configured: true,
+      installations: [{ id: "i1", agent_id: "agent-1", status: "active", installed_at: "" }],
+    };
+    renderUI(<TuituiTab />);
+    expect(screen.queryByTestId("tuitui-installation-allowlist-edit")).toBeNull();
+  });
+
+  it("seeds the dialog from the stored gate and reads an unset one as the wildcard", async () => {
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: ["alice", "bob"],
+          group_allow_from_mode: "unrestricted",
+          group_allow_from: [],
+        },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    const dialog = await screen.findByTestId("tuitui-allowlist-dialog");
+    expect(dialog).toBeInTheDocument();
+    // A stored list is edited as itself…
+    expect(screen.getByTestId("tuitui-allowlist-direct")).toHaveValue("alice, bob");
+    // …and a gate nobody has ever configured starts open, shown as `*` rather
+    // than an empty box that would read as "restricted to nobody" — and, once
+    // saved, mean exactly that.
+    expect(screen.getByTestId("tuitui-allowlist-group")).toHaveValue("*");
+  });
+
+  it("sends both boxes and re-seeds them from what the server stored", async () => {
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: ["alice"],
+          group_allow_from_mode: "allowlist",
+          group_allow_from: ["778899"],
+        },
+      ],
+    };
+    // The echo collapses "alice,*" to the wildcard, which is what the gate now
+    // is; the dialog must show that, not what was typed.
+    const stored = {
+      id: "i1",
+      agent_id: "agent-1",
+      status: "active" as const,
+      installed_at: "",
+      allow_from_mode: "unrestricted",
+      allow_from: [],
+      group_allow_from_mode: "allowlist",
+      group_allow_from: ["778899"],
+    };
+    mutationsRef.allowlist.mutateAsync.mockImplementation(async () => {
+      // Saving invalidates the list query, so the row comes back holding what the
+      // server stored. The mocked query serves that as its data.
+      installationsRef.current = { configured: true, installations: [stored] };
+      return stored;
+    });
+    const view = renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    const direct = await screen.findByTestId("tuitui-allowlist-direct");
+    await userEvent.type(direct, ",*");
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-submit"));
+    await waitFor(() =>
+      expect(mutationsRef.allowlist.mutateAsync).toHaveBeenCalledWith({
+        installationId: "i1",
+        allow_from: "alice,*",
+        group_allow_from: "778899",
+      }),
+    );
+    await waitFor(() => expect(toastRef.success).toHaveBeenCalledWith("Allowlist updated"));
+    expect(screen.queryByTestId("tuitui-allowlist-dialog")).toBeNull();
+    // That save invalidated the list query, i.e. it refetches; the mocked query
+    // only hands the new row over on the next render, so re-render here instead of
+    // assuming the subscription exists.
+    view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <TuituiTab />
+      </I18nProvider>,
+    );
+    // The row summary follows the stored gate: the personal side is open again.
+    expect(screen.getByTestId("tuitui-allowlist-direct-open")).toHaveTextContent(
+      "Anyone can DM it",
+    );
+    expect(screen.getByTestId("tuitui-allowlist-group-listed")).toHaveTextContent(
+      "1 group allowed",
+    );
+    // Reopening shows the stored truth rather than what was typed.
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tuitui-allowlist-direct")).toHaveValue("*"),
+    );
+    expect(screen.getByTestId("tuitui-allowlist-group")).toHaveValue("778899");
+  });
+
+  it("appends a refused id to the box its kind belongs to, without duplicating it", async () => {
+    rejectionsRef.current = {
+      rejections: [
+        { id: "bob", kind: "user", count: 2, last_seen_at: "2026-01-06T10:00:00Z" },
+        { id: "teams_t1_c2", kind: "group", count: 1, last_seen_at: "2026-01-05T10:00:00Z" },
+      ],
+    };
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: ["alice"],
+          group_allow_from_mode: "allowlist",
+          group_allow_from: [],
+        },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    // The refused ids are the only way to learn what to type here: group and
+    // account ids are opaque platform strings nobody can read off a chat window.
+    const refused = await screen.findByTestId("tuitui-allowlist-refusals");
+    expect(refused).toHaveTextContent("bob");
+    expect(refused).toHaveTextContent("teams_t1_c2");
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-refusal-bob"));
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-refusal-teams_t1_c2"));
+    const direct = screen.getByTestId("tuitui-allowlist-direct");
+    const group = screen.getByTestId("tuitui-allowlist-group");
+    expect(direct).toHaveValue("alice, bob");
+    // kind decides the box: the group key belongs in the group list, where it
+    // matches, not the account list, where it would sit there refusing nobody.
+    expect(group).toHaveValue("teams_t1_c2");
+    // The empty group box no longer contradicts itself.
+    expect(screen.queryByTestId("tuitui-allowlist-group-empty")).toBeNull();
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-refusal-bob"));
+    expect(direct).toHaveValue("alice, bob");
+  });
+
+  it("keeps an open wildcard box alone when a refused id is clicked", async () => {
+    rejectionsRef.current = {
+      rejections: [{ id: "bob", kind: "user", count: 3, last_seen_at: "2026-01-06T10:00:00Z" }],
+    };
+    installationsRef.current = {
+      configured: true,
+      installations: [{ id: "i1", agent_id: "agent-1", status: "active", installed_at: "" }],
+    };
+    renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    const direct = await screen.findByTestId("tuitui-allowlist-direct");
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-refusal-bob"));
+    // `*` already admits bob, so adding his id would turn an open gate into a
+    // closed one by accident.
+    expect(direct).toHaveValue("*");
+  });
+
+  it("pages through refused subjects without dropping the draft", async () => {
+    rejectionsRef.current = {
+      rejections: [{ id: "bob", kind: "user", count: 1, last_seen_at: "2026-01-06T10:00:00Z" }],
+      next_offset: 20,
+    };
+    rejectionsRef.next = {
+      rejections: [{ id: "carol", kind: "group", count: 4, last_seen_at: "2026-01-01T10:00:00Z" }],
+    };
+    installationsRef.current = {
+      configured: true,
+      installations: [{ id: "i1", agent_id: "agent-1", status: "active", installed_at: "" }],
+    };
+    const view = renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    const direct = await screen.findByTestId("tuitui-allowlist-direct");
+    await userEvent.type(direct, ", typed-while-paging");
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-refusals-more"));
+    // The next page is fetched under the continued offset...
+    const carol = await screen.findByTestId("tuitui-allowlist-refusal-carol");
+    expect(screen.queryByTestId("tuitui-allowlist-refusal-bob")).toBeNull();
+    // ...and the ids already typed are still there: paging through the refusals
+    // is not a reason to lose a half-written list.
+    expect(direct).toHaveValue("*, typed-while-paging");
+    // A short page is the only answer that can say there is nothing more, so the
+    // affordance disappears with it.
+    expect(screen.queryByTestId("tuitui-allowlist-refusals-more")).toBeNull();
+    // Page two's id is a group, so it belongs to the group box -- which on this
+    // bot is still `*`, where adding an id would only narrow an open gate.
+    await userEvent.click(carol);
+    expect(screen.getByTestId("tuitui-allowlist-group")).toHaveValue("*");
+    // Reopening starts over at the first page: the last page browsed is not a
+    // fact about the gate, and hiding the freshest refusals behind it would make
+    // the list read as "nothing was turned away".
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    view.rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <TuituiTab />
+      </I18nProvider>,
+    );
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tuitui-allowlist-refusal-bob")).toBeInTheDocument(),
+    );
+    expect(direct).toHaveValue("*, typed-while-paging");
+  });
+
+  it("keeps the dialog open with the server's reason when the save is refused", async () => {
+    mutationsRef.allowlist.mutateAsync.mockRejectedValue(
+      new Error("group_allow_from: entry is longer than 128 characters"),
+    );
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: ["alice"],
+          group_allow_from_mode: "allowlist",
+          group_allow_from: ["778899"],
+        },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    const group = await screen.findByTestId("tuitui-allowlist-group");
+    await userEvent.type(group, ",oops");
+    await userEvent.click(screen.getByTestId("tuitui-allowlist-submit"));
+    // The reason names the field, so it is readable as "the second box", not as a
+    // dead end.
+    await waitFor(() =>
+      expect(screen.getByTestId("tuitui-allowlist-error")).toHaveTextContent(
+        "group_allow_from: entry is longer than 128 characters",
+      ),
+    );
+    expect(toastRef.error).toHaveBeenCalled();
+    expect(toastRef.success).not.toHaveBeenCalled();
+    // Nothing was thrown away: the draft is still there to fix.
+    expect(group).toHaveValue("778899,oops");
+  });
+
+  it("warns beside the box that an emptied list blocks everyone", async () => {
+    installationsRef.current = {
+      configured: true,
+      installations: [
+        {
+          id: "i1",
+          agent_id: "agent-1",
+          status: "active",
+          installed_at: "",
+          allow_from_mode: "allowlist",
+          allow_from: ["alice"],
+          group_allow_from_mode: "allowlist",
+          group_allow_from: ["778899"],
+        },
+      ],
+    };
+    renderUI(<TuituiTab />);
+    await userEvent.click(screen.getByTestId("tuitui-installation-allowlist-edit"));
+    const direct = await screen.findByTestId("tuitui-allowlist-direct");
+    expect(screen.queryByTestId("tuitui-allowlist-direct-empty")).toBeNull();
+    await userEvent.clear(direct);
+    // The warning appears as the box is emptied, before the save that would make
+    // it true: a cleared list is a working "block everyone", and an empty input
+    // cannot show that on its own.
+    expect(screen.getByTestId("tuitui-allowlist-direct-empty")).toHaveTextContent(
+      "refusing every direct message",
+    );
   });
 
   it("requires confirmation before revoking an installation", async () => {

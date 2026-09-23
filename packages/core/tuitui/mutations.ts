@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { tuituiKeys } from "./queries";
-import type { RegisterTuituiBYORequest } from "../types";
+import type { RegisterTuituiBYORequest, UpdateTuituiAllowlistsRequest } from "../types";
 
 // Write operations for the Tuitui channel. TanStack Query owns server data on
 // web/desktop, so views never call `api.*` for these flows directly (AGENTS.md
@@ -17,6 +17,29 @@ export function useRegisterTuituiBYO(wsId: string) {
       api.registerTuituiBYO(wsId, agentId, body),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: tuituiKeys.installations(wsId) });
+    },
+  });
+}
+
+/** Save one bot's inbound allowlists. The response is the installation with the
+ * effective gates, but the cache is still invalidated rather than written from
+ * it: the list row carries the member's own bound identities, which this
+ * response does not, and a normalizer that dropped an entry has to become
+ * visible through the same read the panel already trusts. */
+export function useUpdateTuituiAllowlists(wsId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      installationId,
+      ...body
+    }: { installationId: string } & UpdateTuituiAllowlistsRequest) =>
+      api.updateTuituiAllowlists(wsId, installationId, body),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: tuituiKeys.installations(wsId) });
+      // The ids this write just admitted have to leave the "recently refused"
+      // list with it, or the dialog reopens offering what it is holding nothing
+      // against.
+      await qc.invalidateQueries({ queryKey: tuituiKeys.rejectionsAll(wsId) });
     },
   });
 }

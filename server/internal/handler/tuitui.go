@@ -53,6 +53,18 @@ type TuituiInstallationResponse struct {
 	// BoundTuituiUserIDs carries only the requesting member's own Tuitui
 	// accounts for this bot, never other members'.
 	BoundTuituiUserIDs []string `json:"bound_tuitui_user_ids,omitempty"`
+	// AllowFromMode / GroupAllowFromMode echo the EFFECTIVE inbound gates and
+	// AllowFrom / GroupAllowFrom the ids behind a gate that is a list.
+	// "unrestricted" means the bot answers everyone: either the operator
+	// stored the "*" wildcard or this row predates the gate and stores no key
+	// at all. Both behave alike, so the panel shows "*" for either.
+	// "allowlist" means only the echoed ids may talk; the empty list that can
+	// appear there is a deliberate "nobody", never a synonym of unset — which
+	// is exactly why the two modes are separate values instead of one list.
+	AllowFromMode      string   `json:"allow_from_mode"`
+	AllowFrom          []string `json:"allow_from"`
+	GroupAllowFromMode string   `json:"group_allow_from_mode"`
+	GroupAllowFrom     []string `json:"group_allow_from"`
 }
 
 // TuituiGroupBotResponse identifies one connected Multica bot behind a Tuitui
@@ -94,7 +106,35 @@ const (
 	// readable bot identity is unavailable: this adapter never resolves a
 	// display name, so the Settings row falls back to the agent's identity.
 	tuituiBotIdentityIssueNoLookup = "identity_lookup_unavailable"
+
+	// The two echo values of an inbound allowlist gate. See
+	// TuituiInstallationResponse: "unrestricted" covers both the wildcard and
+	// a row stored before the gate existed, "allowlist" names the ids.
+	tuituiAllowlistModeUnrestricted = "unrestricted"
+	tuituiAllowlistModeAllowlist    = "allowlist"
+
+	// tuituiRejectionKindUser / tuituiRejectionKindGroup label a refused
+	// subject for the panel, which needs to know which of the two inputs a
+	// clicked id belongs in.
+	tuituiRejectionKindUser  = "user"
+	tuituiRejectionKindGroup = "group"
 )
+
+// tuituiAllowlistEcho renders one gate as the (mode, ids) pair the response
+// carries. Entries are always a non-nil slice so a list-mode gate with nothing
+// on it serializes as [] ("nobody"), never null — null would be an unparsed
+// field on the client, and "no list" is what the mode already says.
+func tuituiAllowlistEcho(list tuitui.Allowlist) (string, []string) {
+	mode := tuituiAllowlistModeUnrestricted
+	if list.Mode == tuitui.AllowlistSome || list.Mode == tuitui.AllowlistNone {
+		mode = tuituiAllowlistModeAllowlist
+	}
+	entries := list.Entries
+	if entries == nil {
+		entries = []string{}
+	}
+	return mode, entries
+}
 
 // tuituiEffectiveServer reads the stored host/port keys back out of an
 // installation config so every response can echo the server the bot dials.
@@ -124,18 +164,25 @@ func tuituiEffectiveServer(raw []byte) (string, int) {
 
 func tuituiInstallationToResponse(row db.ChannelInstallation) TuituiInstallationResponse {
 	host, port := tuituiEffectiveServer(row.Config)
+	direct, group := tuitui.AllowlistsFromStoredConfig(row.Config)
+	directMode, directEntries := tuituiAllowlistEcho(direct)
+	groupMode, groupEntries := tuituiAllowlistEcho(group)
 	return TuituiInstallationResponse{
-		ID:              uuidToString(row.ID),
-		WorkspaceID:     uuidToString(row.WorkspaceID),
-		AgentID:         uuidToString(row.AgentID),
-		InstallerUserID: uuidToString(row.InstallerUserID),
-		Status:          row.Status,
-		InstalledAt:     row.InstalledAt.Time.UTC().Format(time.RFC3339),
-		CreatedAt:       row.CreatedAt.Time.UTC().Format(time.RFC3339),
-		UpdatedAt:       row.UpdatedAt.Time.UTC().Format(time.RFC3339),
-		AgentAvailable:  true,
-		Host:            host,
-		Port:            port,
+		ID:                 uuidToString(row.ID),
+		WorkspaceID:        uuidToString(row.WorkspaceID),
+		AgentID:            uuidToString(row.AgentID),
+		InstallerUserID:    uuidToString(row.InstallerUserID),
+		Status:             row.Status,
+		InstalledAt:        row.InstalledAt.Time.UTC().Format(time.RFC3339),
+		CreatedAt:          row.CreatedAt.Time.UTC().Format(time.RFC3339),
+		UpdatedAt:          row.UpdatedAt.Time.UTC().Format(time.RFC3339),
+		AgentAvailable:     true,
+		Host:               host,
+		Port:               port,
+		AllowFromMode:      directMode,
+		AllowFrom:          directEntries,
+		GroupAllowFromMode: groupMode,
+		GroupAllowFrom:     groupEntries,
 	}
 }
 
@@ -467,9 +514,196 @@ func (h *Handler) ForgetTuituiGroup(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// TuituiRejectionResponse is one subject a Tuitui bot refused because no
+// allowlist named it: the id to paste, which of the two lists it belongs in,
+// and how recently / how often it was turned away. Content stays out of this —
+// the audit table it reads holds routing facts only.
+type TuituiRejectionResponse struct {
+	// ID is a Tuitui user account (Kind user) or a group id / channel-scoped
+	// "teams_{team}_{channel}" conversation key (Kind group).
+	ID string `json:"id"`
+	// Kind is "user" or "group" — which input the panel adds the id to.
+	Kind string `json:"kind"`
+	// InstallationID / AgentID attribute the refusal to one connected bot, so
+	// a workspace with several bots never mixes their lists into one suggestion.
+	InstallationID string `json:"installation_id"`
+	AgentID        string `json:"agent_id"`
+	// Count is how many messages from this subject were refused, and LastSeenAt
+	// when the newest one arrived. Both only ever grow while the bot is
+	// connected, which is what tells "typing this id in" from "guessing".
+	Count      int64  `json:"count"`
+	LastSeenAt string `json:"last_seen_at"`
+}
+
+// ListTuituiRejectionsResponse wraps the page. Empty is a normal answer (an
+// unconfigured gate refuses nobody, so nothing is pending), never an error.
+// NextOffset is present when the page read from the audit table came back full
+// — which can happen with fewer or even zero visible rows, because a non-admin's
+// visibility filter drops rows after the read. It therefore means "there may be
+// more, keep paging", never "this was truncated for you".
+type ListTuituiRejectionsResponse struct {
+	Rejections []TuituiRejectionResponse `json:"rejections"`
+	NextOffset *int                      `json:"next_offset,omitempty"`
+}
+
+const (
+	// tuituiRejectionsDefaultLimit / tuituiRejectionsMaxLimit bound one page of
+	// the refused-subject list. The panel shows a first screenful and offers
+	// more; the cap keeps a chatty refused group from turning a settings read
+	// into an unbounded aggregate scan.
+	tuituiRejectionsDefaultLimit = 50
+	tuituiRejectionsMaxLimit     = 200
+)
+
+// ListTuituiRejections (GET /api/workspaces/{id}/tuitui/rejections) backs the
+// "recently refused" picker in the allowlist dialog. Reading is gated exactly
+// like the rest of this channel: workspace membership (the route middleware)
+// plus, for a non-admin, the same agent-visibility filter the group inventory
+// applies — a member only sees refusals attributed to bots they may open.
+//
+// Optional query parameters: installation_id (one bot) and limit / offset.
+func (h *Handler) ListTuituiRejections(w http.ResponseWriter, r *http.Request) {
+	wsUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	member, ok := h.workspaceMember(w, r, uuidToString(wsUUID))
+	if !ok {
+		return
+	}
+	// The gate that produced these rows lives in the channel, which only runs
+	// when a master key resolved at boot. Without one nothing can be refused,
+	// so the honest answer is an empty page rather than a 403: the dialog
+	// simply shows no suggestions, like a bot nobody has tried to message.
+	if h.TuituiInstall == nil {
+		writeJSON(w, http.StatusOK, ListTuituiRejectionsResponse{Rejections: []TuituiRejectionResponse{}})
+		return
+	}
+	installationID := strings.TrimSpace(r.URL.Query().Get("installation_id"))
+	var installationUUID pgtype.UUID
+	if installationID != "" {
+		parsed, ok := parseUUIDOrBadRequest(w, installationID, "installation_id")
+		if !ok {
+			return
+		}
+		installationUUID = parsed
+	}
+	limit, ok := parseTuituiRejectionLimit(w, r.URL.Query().Get("limit"))
+	if !ok {
+		return
+	}
+	offset, ok := parseTuituiRejectionOffset(w, r.URL.Query().Get("offset"))
+	if !ok {
+		return
+	}
+	var visibleAgentIDs map[string]struct{}
+	if !roleAllowed(member.Role, "owner", "admin") {
+		_, visible, loaded := h.tuituiAgentVisibility(r.Context(), wsUUID, userID, member)
+		if !loaded {
+			writeError(w, http.StatusInternalServerError, "failed to resolve tuitui rejection visibility")
+			return
+		}
+		visibleAgentIDs = visible
+	}
+	rows, err := h.Queries.ListTuituiAllowlistRejections(r.Context(), db.ListTuituiAllowlistRejectionsParams{
+		DropReason:           tuitui.AllowlistReason,
+		WorkspaceID:          wsUUID,
+		FilterByInstallation: installationID != "",
+		InstallationID:       installationUUID,
+		RowLimit:             int32(limit),
+		RowOffset:            int32(offset),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list tuitui rejections")
+		return
+	}
+	out := make([]TuituiRejectionResponse, 0, len(rows))
+	for _, row := range rows {
+		agentID := uuidToString(row.AgentID)
+		if visibleAgentIDs != nil {
+			if _, visible := visibleAgentIDs[agentID]; !visible {
+				continue
+			}
+		}
+		// A subject id is only meaningful as text: an audit row written before
+		// the chat id existed (channel_chat_id NULL) is filtered in SQL, so an
+		// invalid NULL here would be a bug, not data to render.
+		subjectID := ""
+		if row.SubjectID.Valid {
+			subjectID = row.SubjectID.String
+		}
+		if subjectID == "" {
+			continue
+		}
+		kind := tuituiRejectionKindGroup
+		if row.IsDirect {
+			kind = tuituiRejectionKindUser
+		}
+		lastSeen := ""
+		if row.LastSeenAt.Valid {
+			lastSeen = row.LastSeenAt.Time.UTC().Format(time.RFC3339)
+		}
+		out = append(out, TuituiRejectionResponse{
+			ID:             subjectID,
+			Kind:           kind,
+			InstallationID: uuidToString(row.InstallationID),
+			AgentID:        agentID,
+			Count:          row.SeenCount,
+			LastSeenAt:     lastSeen,
+		})
+	}
+	response := ListTuituiRejectionsResponse{Rejections: out}
+	if len(rows) == limit {
+		next := offset + limit
+		response.NextOffset = &next
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// parseTuituiRejectionLimit reads ?limit= with a default and a clamp: a
+// non-numeric or negative value is the caller's 400, an oversized one is
+// capped, because the cap protects the reader rather than meaning anything to
+// the dialog.
+func parseTuituiRejectionLimit(w http.ResponseWriter, raw string) (int, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return tuituiRejectionsDefaultLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+		return 0, false
+	}
+	if n > tuituiRejectionsMaxLimit {
+		n = tuituiRejectionsMaxLimit
+	}
+	return n, true
+}
+
+// parseTuituiRejectionOffset reads ?offset= the same way, minus the clamp: past
+// the end of the list there is simply nothing to page through.
+func parseTuituiRejectionOffset(w http.ResponseWriter, raw string) (int, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		writeError(w, http.StatusBadRequest, "offset must be zero or a positive integer")
+		return 0, false
+	}
+	return n, true
+}
+
 // RegisterTuituiBYORequest is the body for a bring-your-own-app install: the
 // address of the Tuitui server to connect to plus the two credentials the user
-// pasted from their own Tuitui robot application.
+// pasted from their own Tuitui robot application. The inbound allowlists are NOT
+// part of it: connecting a bot never restricts it (see the "unrestricted"
+// default in allow.go), and the gate has its own narrow write —
+// UpdateTuituiAllowlists — because this endpoint replaces the whole row and
+// would otherwise demand the app_secret again just to add one group.
 type RegisterTuituiBYORequest struct {
 	// BaseURL is the Tuitui server Multica must connect to: "https://host:port",
 	// "wss://host", or a bare "host[:port]". The Tuitui WSS callback and HTTPS
@@ -563,6 +797,22 @@ func parseTuituiServerAddress(raw string) (host string, port int, err error) {
 		host = "[" + host + "]"
 	}
 	return host, port, nil
+}
+
+// tuituiAllowlistFromField turns one optional field of the allowlist write into
+// the value to store. nil (the client said nothing about this list) leaves the
+// stored key alone; a pointer to an empty string is the operator clearing the
+// box, which blocks everyone. Those two must not collapse, or the panel would
+// have no way to leave one list alone while editing the other.
+func tuituiAllowlistFromField(field *string) (*tuitui.Allowlist, error) {
+	if field == nil {
+		return nil, nil
+	}
+	list, err := tuitui.AllowlistFromCSV(*field)
+	if err != nil {
+		return nil, err
+	}
+	return &list, nil
 }
 
 // RegisterTuituiBYO (POST /api/workspaces/{id}/tuitui/install/byo?agent_id=…)
@@ -721,6 +971,130 @@ func (h *Handler) RevokeTuituiInstallation(w http.ResponseWriter, r *http.Reques
 		"id": uuidToString(instUUID),
 	})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// UpdateTuituiAllowlistsRequest is the whole body of the narrow allowlist
+// write. Both fields are optional in the one sense that matters: a key the
+// client omits leaves that list exactly as stored, so the dialog can tighten the
+// group list without resending the personal one. A key sent as an empty string
+// is NOT "no opinion" — it is the box the operator cleared, which stores [] and
+// blocks everyone. The two are only distinguishable because one is absent and
+// the other is present-but-empty, which is why both fields are pointers.
+type UpdateTuituiAllowlistsRequest struct {
+	AllowFrom      *string `json:"allow_from,omitempty"`
+	GroupAllowFrom *string `json:"group_allow_from,omitempty"`
+}
+
+// UpdateTuituiAllowlists (PUT /api/workspaces/{id}/tuitui/installations/{installationId}/allowlists)
+// replaces one bot's inbound allowlists and echoes the installation back with
+// the effective gates.
+//
+// This is deliberately NOT a second submit of the BYO form. That endpoint
+// replaces the whole installation and requires app_id + app_secret, which the
+// panel never holds (the secret is sealed at rest and never echoed, and both
+// inputs are masked), so "add one group to the allowlist" would demand pasting
+// the credential again — and pasting it wrong would break a working bot. Here
+// only the two config keys are written, in place, by one SQL statement that
+// merges them into the stored blob (see SetTuituiInstallationAllowlists).
+//
+// Authorization mirrors RevokeTuituiInstallation exactly: the same person who
+// connected the bot (its agent's manager) or a workspace owner/admin may
+// restrict it, and a workspace-scoped lookup keeps a forged id in another
+// workspace at 404 rather than leaking that the row exists.
+func (h *Handler) UpdateTuituiAllowlists(w http.ResponseWriter, r *http.Request) {
+	if h.TuituiInstall == nil {
+		writeFeatureDisabled(w, "tuitui_not_configured", "tuitui integration not configured")
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "workspace id")
+	if !ok {
+		return
+	}
+	instUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "installationId"), "installation id")
+	if !ok {
+		return
+	}
+	inst, err := h.TuituiInstall.GetInWorkspace(r.Context(), instUUID, wsUUID)
+	if err != nil {
+		if errors.Is(err, tuitui.ErrInstallationNotFound) {
+			writeError(w, http.StatusNotFound, "tuitui installation not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load installation")
+		return
+	}
+	agent, agentErr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+		ID:          inst.AgentID,
+		WorkspaceID: wsUUID,
+	})
+	if agentErr != nil {
+		if _, ok := h.requireWorkspaceRole(w, r, uuidToString(wsUUID), "tuitui installation not found", "owner", "admin"); !ok {
+			return
+		}
+	} else if !h.canManageAgent(w, r, agent) {
+		return
+	}
+	var body UpdateTuituiAllowlistsRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	// Normalized here, once: trimmed, de-duplicated, and validated, so the gate
+	// never has to re-interpret a stored entry and a typo is a 400 naming the
+	// field that holds it rather than a silently inert list.
+	allowFrom, allowErr := tuituiAllowlistFromField(body.AllowFrom)
+	if allowErr != nil {
+		writeError(w, http.StatusBadRequest, "allow_from: "+allowErr.Error())
+		return
+	}
+	groupAllowFrom, groupErr := tuituiAllowlistFromField(body.GroupAllowFrom)
+	if groupErr != nil {
+		writeError(w, http.StatusBadRequest, "group_allow_from: "+groupErr.Error())
+		return
+	}
+	// A revoked bot is not supervised, so its gate decides nothing: writing it
+	// would read as "I restricted that bot" while the row still shows as
+	// disconnected. Refuse rather than park a change nothing will honour.
+	if inst.Status != "active" {
+		writeError(w, http.StatusConflict, "tuitui installation is not active")
+		return
+	}
+	updated, err := h.Queries.SetTuituiInstallationAllowlists(r.Context(), db.SetTuituiInstallationAllowlistsParams{
+		AllowFrom:      tuituiAllowlistStoredJSON(allowFrom),
+		GroupAllowFrom: tuituiAllowlistStoredJSON(groupAllowFrom),
+		ID:             instUUID,
+		WorkspaceID:    wsUUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "tuitui installation not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to update tuitui allowlists")
+		return
+	}
+	// The response is the same echo the list renders, so the dialog can show
+	// what the gate now IS (an entry the operator typed but the normalizer
+	// dropped, or a list that collapsed to the wildcard, is visible immediately)
+	// without a second round trip.
+	writeJSON(w, http.StatusOK, tuituiInstallationToResponse(updated))
+}
+
+// tuituiAllowlistStoredJSON is the jsonb value for one argument of the in-place
+// update: the list to store, or nil to leave that key alone.
+func tuituiAllowlistStoredJSON(list *tuitui.Allowlist) []byte {
+	if list == nil {
+		return nil
+	}
+	stored := list.Stored()
+	if stored == nil {
+		// Unreachable from this endpoint (a nil request field is handled
+		// above), and the safe reading anyway: no opinion, no write.
+		return nil
+	}
+	// A list of strings cannot fail to marshal, so no error path is carried.
+	raw, _ := json.Marshal(*stored)
+	return raw
 }
 
 // RedeemTuituiBindingTokenRequest carries the raw token the user clicked through

@@ -916,6 +916,95 @@ describe("ApiClient schema fallback", () => {
       );
     });
 
+    it("saves one bot's allowlists and reads refused subjects without throwing", async () => {
+      const client = new ApiClient("https://api.example.test");
+
+      // The write carries the raw comma text and answers with the installation
+      // whose gate fields say what was actually stored.
+      stubFetchJson({
+        id: "inst-9",
+        status: "active",
+        allow_from_mode: "allowlist",
+        allow_from: ["alice", "bob"],
+        group_allow_from_mode: "unrestricted",
+        group_allow_from: [],
+      });
+      await expect(
+        client.updateTuituiAllowlists("ws-1", "inst-9", { allow_from: " alice , bob " }),
+      ).resolves.toMatchObject({
+        id: "inst-9",
+        allow_from_mode: "allowlist",
+        allow_from: ["alice", "bob"],
+        group_allow_from_mode: "unrestricted",
+      });
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/workspaces/ws-1/tuitui/installations/inst-9/allowlists",
+        expect.objectContaining({
+          method: "PUT",
+          // Only the box the operator touched: an omitted side stays as stored.
+          body: JSON.stringify({ allow_from: " alice , bob " }),
+        }),
+      );
+
+      // A torn gate echo degrades to an open-looking gate — which is how the
+      // connection itself reads a config value it cannot turn into a list — while
+      // the rest of the installation survives.
+      stubFetchJson({
+        id: "inst-9",
+        status: "active",
+        host: "tuitui.internal",
+        allow_from_mode: 7,
+        allow_from: "alice",
+      });
+      await expect(
+        client.updateTuituiAllowlists("ws-1", "inst-9", { group_allow_from: "" }),
+      ).resolves.toMatchObject({
+        id: "inst-9",
+        host: "tuitui.internal",
+        allow_from_mode: "",
+        allow_from: [],
+        group_allow_from: [],
+      });
+
+      stubFetchJson({
+        rejections: [
+          {
+            id: "bob",
+            kind: "user",
+            installation_id: "inst-9",
+            agent_id: "agent-1",
+            count: 2,
+            last_seen_at: "2026-01-06T10:00:00Z",
+          },
+          // A row that only carries an id is still a subject the bot refused: the
+          // defaults keep the chip clickable and put it in the group box, where a
+          // wrong guess cannot open the bot's direct messages.
+          { id: "teams_t1_c2" },
+        ],
+        next_offset: 20,
+      });
+      await expect(
+        client.listTuituiRejections("ws-1", { installationId: "inst-9", offset: 20, limit: 50 }),
+      ).resolves.toMatchObject({ rejections: [{ id: "bob", kind: "user", count: 2 }, { id: "teams_t1_c2", kind: "group", count: 1 }], next_offset: 20 });
+      expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
+        "https://api.example.test/api/workspaces/ws-1/tuitui/rejections?installation_id=inst-9&offset=20&limit=50",
+        expect.anything(),
+      );
+
+      // A backend that predates the allowlist has no such route; that means
+      // "nothing to suggest", not a dialog that throws.
+      stubFetchJson({ error: "not found" }, 404);
+      await expect(client.listTuituiRejections("ws-1")).resolves.toEqual({ rejections: [] });
+      stubFetchJson({ error: "forbidden" }, 403);
+      await expect(client.listTuituiRejections("ws-1")).resolves.toEqual({ rejections: [] });
+      // Garbage in the list itself falls back the same way; a real transport
+      // failure does not.
+      stubFetchJson({ rejections: "nope" });
+      await expect(client.listTuituiRejections("ws-1")).resolves.toEqual({ rejections: [] });
+      stubFetchJson("", 500);
+      await expect(client.listTuituiRejections("ws-1")).rejects.toMatchObject({ status: 500 });
+    });
+
     it("redeems a binding token with an empty-string fallback, never a crash", async () => {
       const client = new ApiClient("https://api.example.test");
       stubFetchJson({

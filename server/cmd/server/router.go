@@ -947,6 +947,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		tuitui.RegisterTuitui(channelRegistry, tuitui.ChannelDeps{
 			Decrypt: box.Open,
 			Logger:  slog.Default(),
+			// The same non-content drop auditor the inbound ResolverSet writes
+			// through: the allowlist gate refuses a message before the Router
+			// ever resolves it, and its refusals land in channel_inbound_audit
+			// exactly like an unbound-sender drop would.
+			Audit: tuitui.NewAuditor(queries),
 		})
 		installSvc, installErr := tuitui.NewInstallService(queries, pool, box, slog.Default())
 		if installErr != nil {
@@ -1801,15 +1806,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 
 				// Tuitui integration. Same member-visible / agent-owner-or-admin
-				// split as DingTalk, and the same five routes: the inventory the
+				// split as DingTalk, and the same route shape: the inventory the
 				// Settings panel renders, the bots this workspace has connected,
-				// and one group's route retirement.
+				// one group's route retirement, the BYO connect/upsert, the
+				// allowlist write that narrow-updates one bot's gates, and the
+				// refused-subject list that feeds the allowlist picker.
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
 					r.Get("/tuitui/installations", h.ListTuituiInstallations)
 					r.Get("/tuitui/groups", h.ListTuituiGroups)
+					r.Get("/tuitui/rejections", h.ListTuituiRejections)
 					r.Delete("/tuitui/installations/{installationId}/groups/{conversationId}", h.ForgetTuituiGroup)
 					r.Delete("/tuitui/installations/{installationId}", h.RevokeTuituiInstallation)
+					r.Put("/tuitui/installations/{installationId}/allowlists", h.UpdateTuituiAllowlists)
 					r.Post("/tuitui/install/byo", h.RegisterTuituiBYO)
 				})
 

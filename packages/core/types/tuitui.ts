@@ -32,6 +32,65 @@ export interface TuituiInstallation {
    * this bot. Member-scoped so the member-visible installation endpoint does
    * not disclose other members' Tuitui identities. */
   bound_tuitui_user_ids?: string[];
+  /** Which of the two inbound gates this bot applies. Optional because a
+   * backend predating the allowlist sends neither field, and the panel then
+   * treats both gates as unrestricted (which is exactly how such a bot
+   * behaves). `unrestricted` answers everyone — the operator stored `*`, or
+   * never configured the gate; `allowlist` answers only the ids in the
+   * matching list, and a `allowlist` with an EMPTY list is a deliberate
+   * "nobody", never a synonym of `unrestricted`. */
+  allow_from_mode?: TuituiAllowlistMode;
+  /** The Tuitui accounts allowed to DM this bot. Empty when
+   * `allow_from_mode` is `unrestricted`, so an open bot can never be misread
+   * as a closed one. */
+  allow_from?: string[];
+  /** Gate for group chats and teams channels, applied first; a conversation
+   * missing from it falls back to `allow_from` for its sender. */
+  group_allow_from_mode?: TuituiAllowlistMode;
+  /** The group ids / teams channel keys allowed, as above. */
+  group_allow_from?: string[];
+}
+
+/** Echo of one inbound allowlist gate. Unknown values degrade to the string
+ * type rather than throwing: an older client shows the ids it was given and
+ * leaves the label generic. */
+export type TuituiAllowlistMode = "unrestricted" | "allowlist" | string;
+
+/** One subject (a person or a conversation) a Tuitui bot turned away because
+ * no allowlist named it. The panel offers these as one-click entries, which is
+ * the only practical way to fill the lists in: Tuitui ids are opaque numbers
+ * nobody can type from memory. */
+export interface TuituiRejection {
+  /** A Tuitui user account when `kind` is "user", otherwise a group id or a
+   * channel-scoped `teams_{team}_{channel}` key — pasteable as-is. */
+  id: string;
+  /** Which of the two lists this id belongs in. */
+  kind: TuituiRejectionKind;
+  /** The bot that refused, and the agent behind it. */
+  installation_id: string;
+  agent_id: string;
+  /** How many messages were turned away for this subject, and when the newest
+   * one arrived. Both only grow while the bot is connected, which is what
+   * distinguishes "add this id" from "guess an id". */
+  count: number;
+  last_seen_at: string;
+}
+
+export type TuituiRejectionKind = "user" | "group" | string;
+
+export interface ListTuituiRejectionsResponse {
+  rejections: TuituiRejection[];
+  /** Offset for the next page, absent when the list is complete. */
+  next_offset?: number;
+}
+
+export interface ListTuituiRejectionsParams {
+  /** Restrict the list to one connected bot — what an installation's own dialog
+   * shows, so a workspace with several bots never mixes their refusals into one
+   * suggestion list. */
+  installationId?: string;
+  offset?: number;
+  limit?: number;
 }
 
 export interface ListTuituiInstallationsResponse {
@@ -105,6 +164,31 @@ export interface RegisterTuituiBYORequest {
   base_url: string;
   app_id: string;
   app_secret: string;
+  // No allowlist fields here on purpose: this request replaces the whole
+  // installation, so carrying the two lists through it would demand the
+  // app_secret again for what is meant to be a one-box edit. A freshly connected
+  // bot answers everyone until its lists are written.
+}
+
+/** Body of the narrow allowlist write (PUT
+ * /api/workspaces/{id}/tuitui/installations/{installationId}/allowlists): the
+ * comma-separated text of the two inbound lists, exactly as the panel's inputs
+ * hold them. The backend trims, de-duplicates, validates, and stores them, and
+ * answers with the echoed installation so the dialog shows the effective lists
+ * rather than what was typed.
+ *
+ * Omitting a key means "leave that list exactly as it is", which is why both
+ * fields are optional; sending `""` is not "nothing to say" but "clear it", and
+ * stores an empty list — nobody may talk to this bot on that side. `*` allows
+ * all, and `*` beside concrete ids is stored as the wildcard alone because the
+ * gate tests for the wildcard first.
+ *
+ * The write deliberately does not go through the BYO install endpoint: that one
+ * replaces the whole installation and requires the app_id + app_secret again,
+ * which the panel never holds (the secret is sealed at rest and not echoed). */
+export interface UpdateTuituiAllowlistsRequest {
+  allow_from?: string;
+  group_allow_from?: string;
 }
 
 /** Post-redemption echo: the Tuitui user id the token carried is now bound to

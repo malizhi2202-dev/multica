@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Settings2, Trash2 } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
@@ -49,14 +49,18 @@ import { useActorName } from "@multica/core/workspace/hooks";
 import {
   tuituiGroupsOptions,
   tuituiInstallationsOptions,
+  tuituiRejectionsOptions,
   useDeleteTuituiInstallation,
   useForgetTuituiGroup,
   useRegisterTuituiBYO,
+  useUpdateTuituiAllowlists,
 } from "@multica/core/tuitui";
 import type {
   TuituiGroup,
   TuituiGroupBot,
   TuituiInstallation,
+  TuituiRejection,
+  UpdateTuituiAllowlistsRequest,
 } from "@multica/core/types";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { useT, useTimeAgo } from "../../i18n";
@@ -683,6 +687,304 @@ export function TuituiTab() {
   );
 }
 
+// tuituiAllowlistFieldText turns one gate's echo into the text its input holds.
+// Anything but an explicit list reads as `*`, which is both the truth (a bot
+// with no stored key answers everyone) and what makes the box safe to edit: the
+// operator starts from the wildcard and types over it, instead of starting from
+// an empty box that — once saved — means "nobody" rather than "nothing yet".
+function tuituiAllowlistFieldText(
+  entries: string[] | undefined,
+  mode: string | undefined,
+): string {
+  if (mode !== "allowlist") return "*";
+  return (entries ?? []).join(", ");
+}
+
+/** How one gate reads on the installation row: open (answers everyone), a list
+  with N entries, or closed for good (an explicit empty list). */
+type TuituiAllowlistGate =
+  | { kind: "open" }
+  | { kind: "closed" }
+  | { kind: "listed"; count: number };
+
+// tuituiAllowlistGate classifies the echo of one gate. The three cases are the
+// three the operator can create, and the row has to tell them apart without
+// opening the dialog — a stored empty list looks identical to an untouched one
+// anywhere the mode is not read alongside it.
+function tuituiAllowlistGate(
+  entries: string[] | undefined,
+  mode: string | undefined,
+): TuituiAllowlistGate {
+  if (mode !== "allowlist") return { kind: "open" };
+  const count = (entries ?? []).length;
+  return count === 0 ? { kind: "closed" } : { kind: "listed", count };
+}
+
+// tuituiAppendAllowlistEntry adds one refused id to a box without duplicating it
+// or turning an already-open box into a restricted one: `*` already covers
+// everything, so a click there is a no-op by design.
+function tuituiAppendAllowlistEntry(current: string, id: string): string {
+  const entries = current
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.includes("*") || entries.includes(id)) return current;
+  return [...entries, id].join(", ");
+}
+
+// TuituiAllowlistDialog edits one bot's two inbound gates through its own
+// endpoint rather than the connect form, because the connect form replaces the
+// whole installation and would demand the app_secret again — which the panel
+// never sees — just to add one group id. All text state is owned by the row and
+// seeded when it opens the dialog, so reopening always shows the stored gate
+// rather than whatever was typed and abandoned (same controlled shape as
+// TuituiByoFields).
+function TuituiAllowlistDialog({
+  installationId,
+  open,
+  draft,
+  offset,
+  error,
+  onDraftChange,
+  onMore,
+  onSaved,
+  onError,
+  onOpenChange,
+}: {
+  installationId: string;
+  open: boolean;
+  /** The two boxes as the row holds them. One object, because one submit owns
+   * both lists: saving them separately could leave one side tightened and the
+   * other still open. */
+  draft: UpdateTuituiAllowlistsRequest;
+  /** Page of the refused-subject list this dialog is showing. */
+  offset: number;
+  error: string;
+  onDraftChange: (next: UpdateTuituiAllowlistsRequest) => void;
+  onMore: (nextOffset: number) => void;
+  /** Hands the echoed installation back so the row can re-seed both boxes with
+   * what the server actually stored (an entry the normalizer dropped, or a list
+   * that collapsed to the wildcard, becomes visible immediately). */
+  onSaved: (installation: TuituiInstallation) => void;
+  onError: (message: string) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { t } = useT("settings");
+  const wsId = useWorkspaceId();
+  const update = useUpdateTuituiAllowlists(wsId);
+  const { data: refusals } = useQuery({
+    ...tuituiRejectionsOptions(wsId, installationId, offset),
+    enabled: open,
+  });
+  const items = refusals?.rejections ?? [];
+
+  // One submit owns both boxes: the two lists are stored together, and saving
+  // them separately would let a half-finished edit leave one side tightened and
+  // the other still open.
+  async function handleSave() {
+    if (update.isPending) return;
+    try {
+      const saved = await update.mutateAsync({ installationId, ...draft });
+      onSaved(saved);
+      toast.success(t(($) => $.tuitui.allowlist_saved_toast));
+      onOpenChange(false);
+    } catch (e) {
+      // The backend names the exact rule the rejected entry broke, so it is shown
+      // verbatim rather than folded into a generic failure.
+      const message = e instanceof Error ? e.message : t(($) => $.tuitui.allowlist_failed_toast);
+      onError(message);
+      toast.error(message);
+    }
+  }
+
+  function addRefusal(refusal: TuituiRejection) {
+    // kind decides the box: an account belongs to the direct list, a group id or
+    // teams channel key to the group list. Getting that backwards is not a
+    // harmless typo — the wrong list never matches, so the id stays refused and
+    // the operator has no idea why.
+    if (refusal.kind === "user") {
+      onDraftChange({
+        ...draft,
+        allow_from: tuituiAppendAllowlistEntry(draft.allow_from ?? "", refusal.id),
+      });
+    } else {
+      onDraftChange({
+        ...draft,
+        group_allow_from: tuituiAppendAllowlistEntry(draft.group_allow_from ?? "", refusal.id),
+      });
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !update.isPending) onOpenChange(false);
+      }}
+    >
+      <DialogContent
+        className="gap-0 overflow-hidden p-0 sm:max-w-lg"
+        data-testid="tuitui-allowlist-dialog"
+      >
+        <DialogHeader className="gap-1 border-b px-5 py-3">
+          <DialogTitle className="text-title-sm font-semibold">
+            {t(($) => $.tuitui.allowlist_dialog_title)}
+          </DialogTitle>
+          <p className="text-caption text-muted-foreground">
+            {t(($) => $.tuitui.allowlist_dialog_description)}
+          </p>
+        </DialogHeader>
+
+        <div className="space-y-4 p-5">
+          <div className="space-y-1.5">
+            <Label htmlFor="tuitui-allowlist-direct" className="text-caption text-muted-foreground">
+              {t(($) => $.tuitui.allowlist_direct_label)}
+            </Label>
+            <Input
+              id="tuitui-allowlist-direct"
+              data-testid="tuitui-allowlist-direct"
+              value={draft.allow_from ?? ""}
+              onChange={(e) => onDraftChange({ ...draft, allow_from: e.target.value })}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              disabled={update.isPending}
+              aria-invalid={!!error}
+              aria-describedby="tuitui-allowlist-direct-hint"
+            />
+            <p
+              id="tuitui-allowlist-direct-hint"
+              className="text-caption leading-relaxed text-muted-foreground"
+            >
+              {t(($) => $.tuitui.allowlist_direct_hint)}
+            </p>
+            {/* The consequence of an empty box is stated where it can be caused,
+                not only in the hint: a cleared list is a working "block
+                everyone", and a bot quietly left closed is the one outcome an
+                empty input cannot show on its own. */}
+            {(draft.allow_from ?? "").trim() === "" ? (
+              <p
+                className="text-caption text-destructive"
+                data-testid="tuitui-allowlist-direct-empty"
+              >
+                {t(($) => $.tuitui.allowlist_direct_none)}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="tuitui-allowlist-group" className="text-caption text-muted-foreground">
+              {t(($) => $.tuitui.allowlist_group_label)}
+            </Label>
+            <Input
+              id="tuitui-allowlist-group"
+              data-testid="tuitui-allowlist-group"
+              value={draft.group_allow_from ?? ""}
+              onChange={(e) => onDraftChange({ ...draft, group_allow_from: e.target.value })}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              disabled={update.isPending}
+              aria-describedby="tuitui-allowlist-group-hint"
+            />
+            <p
+              id="tuitui-allowlist-group-hint"
+              className="text-caption leading-relaxed text-muted-foreground"
+            >
+              {t(($) => $.tuitui.allowlist_group_hint)}
+            </p>
+            {(draft.group_allow_from ?? "").trim() === "" ? (
+              <p
+                className="text-caption text-destructive"
+                data-testid="tuitui-allowlist-group-empty"
+              >
+                {t(($) => $.tuitui.allowlist_group_none)}
+              </p>
+            ) : null}
+          </div>
+
+          {/* Recently refused subjects. These ids are opaque platform strings
+              nobody can read out of a chat window or type from memory, so
+              without this list the boxes are unfillable in practice — which is
+              why refusals are audited at all. */}
+          {(items.length > 0 || refusals?.next_offset !== undefined) && (
+            <div className="space-y-1.5" data-testid="tuitui-allowlist-refusals">
+              <p className="text-caption text-muted-foreground">
+                {t(($) => $.tuitui.allowlist_refusals_label)}
+              </p>
+              <ul className="flex flex-wrap gap-1.5">
+                {items.map((refusal) => (
+                  <li key={`${refusal.kind}:${refusal.id}`}>
+                    <button
+                      type="button"
+                      data-testid={`tuitui-allowlist-refusal-${refusal.id}`}
+                      onClick={() => addRefusal(refusal)}
+                      className="inline-flex max-w-full items-center gap-1 rounded-xs border border-border/70 px-1.5 py-0.5 font-mono text-micro transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <span className="min-w-0 truncate">{refusal.id}</span>
+                      <span className="tabular-nums text-muted-foreground">{refusal.count}</span>
+                      <span className="sr-only">
+                        {t(
+                          refusal.kind === "user"
+                            ? ($) => $.tuitui.allowlist_refusal_add_direct
+                            : ($) => $.tuitui.allowlist_refusal_add_group,
+                        )}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {refusals?.next_offset !== undefined ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-testid="tuitui-allowlist-refusals-more"
+                  onClick={() => onMore(refusals.next_offset ?? 0)}
+                  disabled={update.isPending}
+                >
+                  {t(($) => $.tuitui.allowlist_refusals_more)}
+                </Button>
+              ) : null}
+              <p className="text-caption leading-relaxed text-muted-foreground">
+                {t(($) => $.tuitui.allowlist_refusals_hint)}
+              </p>
+            </div>
+          )}
+
+          {error ? (
+            <p
+              role="alert"
+              data-testid="tuitui-allowlist-error"
+              className="text-caption text-destructive"
+            >
+              {`${t(($) => $.tuitui.allowlist_submit_error)} ${error}`}
+            </p>
+          ) : null}
+        </div>
+
+        {/* Inline footer, not <DialogFooter>: the same p-0 offset workaround as
+            the add dialog below. */}
+        <div className="flex items-center justify-end gap-2 border-t bg-background px-5 py-3">
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={update.isPending}>
+            {t(($) => $.tuitui.byo_cancel)}
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={update.isPending}
+            data-testid="tuitui-allowlist-submit"
+          >
+            {update.isPending
+              ? t(($) => $.tuitui.allowlist_saving)
+              : t(($) => $.tuitui.allowlist_save)}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function TuituiInstallationRow({
   installation,
   canManage,
@@ -708,6 +1010,40 @@ function TuituiInstallationRow({
     : [];
   const botIdentity =
     suppliedBotIdentity ?? getTuituiBotIdentity(groups, installation.id);
+
+  // The dialog is fully controlled from here, and the boxes are seeded by the
+  // click that opens it: reopening must show the gate as stored, not as typed and
+  // abandoned. `direct`/`group` are the comma strings the endpoint expects.
+  const [allowlistOpen, setAllowlistOpen] = useState(false);
+  const [allowlistDraft, setAllowlistDraft] = useState<UpdateTuituiAllowlistsRequest>({
+    allow_from: "*",
+    group_allow_from: "*",
+  });
+  const [allowlistOffset, setAllowlistOffset] = useState(0);
+  const [allowlistError, setAllowlistError] = useState("");
+
+  function openAllowlistDialog() {
+    setAllowlistDraft({
+      allow_from: tuituiAllowlistFieldText(installation.allow_from, installation.allow_from_mode),
+      group_allow_from: tuituiAllowlistFieldText(
+        installation.group_allow_from,
+        installation.group_allow_from_mode,
+      ),
+    });
+    setAllowlistOffset(0);
+    setAllowlistError("");
+    setAllowlistOpen(true);
+  }
+
+  // Which of the two gates is in force, said plainly on the row: a bot that is
+  // closed to everyone has to be readable without opening anything, because an
+  // empty list looks exactly like an untouched one from the outside.
+  const directGate = tuituiAllowlistGate(installation.allow_from, installation.allow_from_mode);
+  const groupGate = tuituiAllowlistGate(
+    installation.group_allow_from,
+    installation.group_allow_from_mode,
+  );
+
   return (
     <div className="py-6" data-testid="tuitui-installation-row">
       <div className="flex items-start justify-between gap-6">
@@ -758,19 +1094,64 @@ function TuituiInstallationRow({
                   when: formatInstalledAt(installation.installed_at, i18n.language),
                 })}
               </span>
+              {directGate.kind !== "open" || groupGate.kind !== "open" ? (
+                <span
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-micro"
+                  data-testid="tuitui-installation-allowlist"
+                >
+                  <span aria-hidden="true">·</span>
+                  <span
+                    className={cn(
+                      "text-muted-foreground",
+                      directGate.kind === "closed" && "text-destructive",
+                    )}
+                    data-testid={`tuitui-allowlist-direct-${directGate.kind}`}
+                  >
+                    {directGate.kind === "open"
+                      ? t(($) => $.tuitui.allowlist_direct_all)
+                      : directGate.kind === "closed"
+                        ? t(($) => $.tuitui.allowlist_direct_none)
+                        : t(($) => $.tuitui.allowlist_direct_summary, { count: directGate.count })}
+                  </span>
+                  <span
+                    className={cn(
+                      "text-muted-foreground",
+                      groupGate.kind === "closed" && "text-destructive",
+                    )}
+                    data-testid={`tuitui-allowlist-group-${groupGate.kind}`}
+                  >
+                    {groupGate.kind === "open"
+                      ? t(($) => $.tuitui.allowlist_group_all)
+                      : groupGate.kind === "closed"
+                        ? t(($) => $.tuitui.allowlist_group_none)
+                        : t(($) => $.tuitui.allowlist_group_summary, { count: groupGate.count })}
+                  </span>
+                </span>
+              ) : null}
             </div>
           </div>
         </div>
         {canManage && isActive && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onDisconnect}
-            data-testid="tuitui-installation-disconnect"
-          >
-            <Trash2 className="h-3 w-3" aria-hidden="true" />
-            {t(($) => $.tuitui.disconnect)}
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={openAllowlistDialog}
+              data-testid="tuitui-installation-allowlist-edit"
+            >
+              <Settings2 className="h-3 w-3" aria-hidden="true" />
+              {t(($) => $.tuitui.allowlist_button)}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onDisconnect}
+              data-testid="tuitui-installation-disconnect"
+            >
+              <Trash2 className="h-3 w-3" aria-hidden="true" />
+              {t(($) => $.tuitui.disconnect)}
+            </Button>
+          </div>
         )}
       </div>
       {isActive && (
@@ -782,6 +1163,31 @@ function TuituiInstallationRow({
           className="space-y-3 pt-5"
         />
       )}
+      <TuituiAllowlistDialog
+        installationId={installation.id}
+        open={allowlistOpen}
+        draft={allowlistDraft}
+        offset={allowlistOffset}
+        error={allowlistError}
+        onDraftChange={(next) => {
+          setAllowlistDraft(next);
+          // The error described the previous submit attempt.
+          setAllowlistError("");
+        }}
+        onMore={setAllowlistOffset}
+        onSaved={(saved) => {
+          setAllowlistDraft({
+            allow_from: tuituiAllowlistFieldText(saved.allow_from, saved.allow_from_mode),
+            group_allow_from: tuituiAllowlistFieldText(
+              saved.group_allow_from,
+              saved.group_allow_from_mode,
+            ),
+          });
+          setAllowlistError("");
+        }}
+        onError={setAllowlistError}
+        onOpenChange={setAllowlistOpen}
+      />
     </div>
   );
 }

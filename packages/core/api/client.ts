@@ -193,7 +193,10 @@ import type {
   ListTuituiInstallationsResponse,
   ListTuituiGroupsResponse,
   ListTuituiGroupsParams,
+  ListTuituiRejectionsResponse,
+  ListTuituiRejectionsParams,
   RegisterTuituiBYORequest,
+  UpdateTuituiAllowlistsRequest,
   RedeemTuituiBindingTokenResponse,
   WecomInstallation,
   ListWecomInstallationsResponse,
@@ -370,10 +373,12 @@ import {
   TuituiInstallationSchema,
   ListTuituiInstallationsResponseSchema,
   ListTuituiGroupsResponseSchema,
+  ListTuituiRejectionsResponseSchema,
   RedeemTuituiBindingTokenResponseSchema,
   EMPTY_TUITUI_INSTALLATION,
   EMPTY_LIST_TUITUI_INSTALLATIONS_RESPONSE,
   EMPTY_LIST_TUITUI_GROUPS_RESPONSE,
+  EMPTY_LIST_TUITUI_REJECTIONS_RESPONSE,
   EMPTY_REDEEM_TUITUI_BINDING_TOKEN_RESPONSE,
   WecomInstallationSchema,
   ListWecomInstallationsResponseSchema,
@@ -4983,6 +4988,44 @@ export class ApiClient {
     );
   }
 
+  // listTuituiRejections reads back the subjects this workspace's Tuitui bots
+  // turned away because no allowlist named them. The panel needs them because
+  // these ids are opaque platform strings nobody can type from memory: a refused
+  // message is the only moment the platform tells us the id exists. Reading it is
+  // member-gated server-side and filtered by the same agent visibility as the
+  // group inventory.
+  async listTuituiRejections(
+    workspaceId: string,
+    params: ListTuituiRejectionsParams = {},
+  ): Promise<ListTuituiRejectionsResponse> {
+    let raw: unknown;
+    try {
+      const search = new URLSearchParams();
+      if (params.installationId) search.set("installation_id", params.installationId);
+      if (params.offset !== undefined) search.set("offset", String(params.offset));
+      if (params.limit !== undefined) search.set("limit", String(params.limit));
+      const suffix = search.size > 0 ? `?${search.toString()}` : "";
+      raw = await this.fetch<unknown>(
+        `/api/workspaces/${workspaceId}/tuitui/rejections${suffix}`,
+      );
+    } catch (error) {
+      // A backend predating the allowlist 404s this additive endpoint, and an
+      // older build may answer 403 to a member; both simply mean "no
+      // suggestions to offer", which the dialog renders as an empty list. A real
+      // failure stays visible.
+      if (error instanceof ApiError && (error.status === 404 || error.status === 403)) {
+        return EMPTY_LIST_TUITUI_REJECTIONS_RESPONSE;
+      }
+      throw error;
+    }
+    return parseWithFallback(
+      raw,
+      ListTuituiRejectionsResponseSchema,
+      EMPTY_LIST_TUITUI_REJECTIONS_RESPONSE,
+      { endpoint: "GET /api/workspaces/:id/tuitui/rejections" },
+    );
+  }
+
   async forgetTuituiGroup(
     workspaceId: string,
     installationId: string,
@@ -5015,6 +5058,23 @@ export class ApiClient {
     );
     return parseWithFallback(raw, TuituiInstallationSchema, EMPTY_TUITUI_INSTALLATION, {
       endpoint: "POST /api/workspaces/:id/tuitui/install/byo",
+    });
+  }
+
+  // updateTuituiAllowlists saves one bot's inbound allowlists without touching
+  // its credentials: the endpoint writes only the two list keys and returns the
+  // installation with the effective gates echoed.
+  async updateTuituiAllowlists(
+    workspaceId: string,
+    installationId: string,
+    body: UpdateTuituiAllowlistsRequest,
+  ): Promise<TuituiInstallation> {
+    const raw = await this.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/tuitui/installations/${installationId}/allowlists`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+    return parseWithFallback(raw, TuituiInstallationSchema, EMPTY_TUITUI_INSTALLATION, {
+      endpoint: "PUT /api/workspaces/:id/tuitui/installations/:installationId/allowlists",
     });
   }
 

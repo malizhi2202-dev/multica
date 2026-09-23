@@ -27,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
 )
@@ -79,6 +81,12 @@ type Config struct {
 	// ReactionEmoji is used by SendReaction. Empty uses
 	// DefaultReactionEmoji.
 	ReactionEmoji string
+
+	// AllowFrom / GroupAllowFrom gate which senders and conversations may
+	// reach the core at all (see allow.go for the decision rule and why an
+	// absent key imposes no restriction).
+	AllowFrom      Allowlist
+	GroupAllowFrom Allowlist
 }
 
 // installConfig is the JSON shape stored in channel_installation.config for
@@ -98,6 +106,215 @@ type installConfig struct {
 	Port               int    `json:"port,omitempty"`
 	MaxMessageLength   int    `json:"max_message_length,omitempty"`
 	ReactionEmoji      string `json:"reaction_emoji,omitempty"`
+	// AllowFrom gates DMs (Tuitui user accounts); GroupAllowFrom gates group
+	// and teams conversations by their conversation id. Same key names and the
+	// same list-of-strings value shape as the reference bridge client's
+	// config.bridge section, but stored normalized (comma strings are split on
+	// write by the handler, never here).
+	//
+	// The pointer plus omitempty is what keeps "not configured" and
+	// "configured as nobody" distinguishable in the stored JSON: absent key (or
+	// null) writes nothing and imposes nothing, while an explicit [] is written
+	// as an empty array and denies everyone. A bare []string with omitempty
+	// would collapse both into "no key".
+	AllowFrom      *[]string `json:"allow_from,omitempty"`
+	GroupAllowFrom *[]string `json:"group_allow_from,omitempty"`
+}
+
+// AllowWildcard is the entry that opens one list to everyone, mirroring the
+// reference bridge client's config docs ("* = allow all").
+const AllowWildcard = "*"
+
+// MaxAllowlistEntries / MaxAllowlistEntryLen bound one stored list. They are
+// write-path validation only: a Settings submit with more entries is a 400 the
+// dialog can show rather than an unbounded JSON blob in channel_installation.
+const (
+	MaxAllowlistEntries  = 500
+	MaxAllowlistEntryLen = 128
+)
+
+// AllowlistMode is the verdict of one allowlist field as STORED, which is a
+// three-way distinction the adapter must never collapse:
+//
+//   - AllowlistUnset: config has no key at all (every installation created
+//     before this feature, plus an explicit JSON null). Imposes no
+//     restriction — see Allowlist for why this is the only safe default.
+//   - AllowlistAll: the stored list contains "*", including a mixed "*" plus
+//     concrete ids, which is what the dialog prefills.
+//   - AllowlistSome: concrete ids only.
+//   - AllowlistNone: the key is present and the list is empty: fail closed.
+type AllowlistMode int
+
+const (
+	AllowlistUnset AllowlistMode = iota
+	AllowlistAll
+	AllowlistSome
+	AllowlistNone
+)
+
+// Allowlist is one normalized inbound allowlist field (allow_from or
+// group_allow_from). Entries carries only the concrete ids; the wildcard is
+// recorded as Mode, never as an entry, so nothing downstream has to read that
+// symbol again.
+type Allowlist struct {
+	Mode    AllowlistMode
+	Entries []string
+}
+
+// Allows reports whether id passes this list. The comparison is exact and
+// case-sensitive, like the reference bridge client's membership test.
+func (a Allowlist) Allows(id string) bool {
+	switch a.Mode {
+	case AllowlistAll:
+		return true
+	case AllowlistSome:
+		for _, entry := range a.Entries {
+			if entry == id {
+				return true
+			}
+		}
+		return false
+	case AllowlistNone:
+		return false
+	default: // AllowlistUnset
+		return true
+	}
+}
+
+// Unrestricted reports whether the list lets every subject through: either the
+// operator asked for it ("*") or never configured one.
+func (a Allowlist) Unrestricted() bool { return a.Mode == AllowlistAll || a.Mode == AllowlistUnset }
+
+// Configured reports whether the stored config carried the key at all, which is
+// what the API echo uses to tell "this bot has a list" from "nobody ever set
+// one up".
+func (a Allowlist) Configured() bool { return a.Mode != AllowlistUnset }
+
+// Stored returns the JSON value for one list, or nil when it is unconfigured so
+// installConfig's omitempty leaves the key out and the row keeps the
+// not-configured shape. An AllowlistAll is written back as the bare wildcard.
+func (a Allowlist) Stored() *[]string {
+	switch a.Mode {
+	case AllowlistUnset:
+		return nil
+	case AllowlistAll:
+		entries := []string{AllowWildcard}
+		return &entries
+	case AllowlistSome:
+		entries := append([]string(nil), a.Entries...)
+		return &entries
+	default: // AllowlistNone
+		entries := []string{}
+		return &entries
+	}
+}
+
+// allowlistFromStored resolves one decoded config key into its Allowlist. The
+// *[]string shape is what keeps the three cases distinguishable: nil pointer =
+// key absent (or null), pointer to an empty slice = explicit empty list,
+// pointer to entries = a list. A plain []string could not tell the first two
+// apart without leaning on Go's nil-versus-empty accident.
+func allowlistFromStored(stored *[]string) Allowlist {
+	if stored == nil {
+		return Allowlist{Mode: AllowlistUnset}
+	}
+	entries := make([]string, 0, len(*stored))
+	for _, entry := range *stored {
+		entry = strings.TrimSpace(entry)
+		if entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return allowlistFromEntries(entries)
+}
+
+// allowlistFromEntries classifies an already-trimmed, non-empty entry list.
+// Wildcard wins over everything stored beside it: the reference bridge client
+// tests membership of "*" first, so concrete entries behind it are inert and
+// are dropped rather than echoed as if they still restricted anything.
+func allowlistFromEntries(entries []string) Allowlist {
+	for _, entry := range entries {
+		if entry == AllowWildcard {
+			return Allowlist{Mode: AllowlistAll}
+		}
+	}
+	entries = dedupeKeepOrder(entries)
+	if len(entries) == 0 {
+		return Allowlist{Mode: AllowlistNone}
+	}
+	return Allowlist{Mode: AllowlistSome, Entries: entries}
+}
+
+// dedupeKeepOrder collapses repeated ids without re-sorting, so what the user
+// typed stays in the same order on screen.
+func dedupeKeepOrder(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// ParseAllowlistCSV normalizes one comma-separated dialog field into the
+// entries to store: trimmed, empty items dropped, duplicates collapsed, and a
+// lone "*" when the wildcard appears anywhere. It is the validation the write
+// path shares with AllowlistFromCSV, exported so a handler can report the
+// precise violation as a 400 rather than a catch-all failure.
+func ParseAllowlistCSV(field string) ([]string, error) {
+	var out []string
+	for _, part := range strings.Split(field, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if part == AllowWildcard {
+			return []string{AllowWildcard}, nil
+		}
+		if n := utf8.RuneCountInString(part); n > MaxAllowlistEntryLen {
+			return nil, fmt.Errorf("an allowlist entry is too long (%d characters; the limit is %d)", n, MaxAllowlistEntryLen)
+		}
+		if strings.IndexFunc(part, unicode.IsControl) >= 0 {
+			return nil, errors.New("an allowlist entry contains a control character")
+		}
+		out = append(out, part)
+	}
+	out = dedupeKeepOrder(out)
+	if len(out) > MaxAllowlistEntries {
+		return nil, fmt.Errorf("too many allowlist entries (%d; the limit is %d)", len(out), MaxAllowlistEntries)
+	}
+	return out, nil
+}
+
+// AllowlistFromCSV turns one Settings dialog field into the stored tri-state.
+// An empty or wildcard-free field that normalizes to nothing is
+// AllowlistNone — "configured, and nobody is on it" — which is why the write
+// path must distinguish an absent field from an empty one before calling this.
+func AllowlistFromCSV(field string) (Allowlist, error) {
+	entries, err := ParseAllowlistCSV(field)
+	if err != nil {
+		return Allowlist{}, err
+	}
+	return allowlistFromEntries(entries), nil
+}
+
+// AllowlistsFromStoredConfig decodes just the two allowlist keys out of a
+// stored channel_installation.config blob, for the management surface that
+// echoes the effective lists without decrypting any credential. A torn or
+// pre-feature blob reads back as "not configured", which is precisely what the
+// inbound gate applies to the same blob — echo and enforcement cannot
+// disagree, because both go through allowlistFromStored.
+func AllowlistsFromStoredConfig(raw []byte) (direct, group Allowlist) {
+	notConfigured := Allowlist{Mode: AllowlistUnset}
+	var ic installConfig
+	if len(raw) == 0 || json.Unmarshal(raw, &ic) != nil {
+		return notConfigured, notConfigured
+	}
+	return allowlistFromStored(ic.AllowFrom), allowlistFromStored(ic.GroupAllowFrom)
 }
 
 // Decrypter turns stored secretbox ciphertext into plaintext (same shape as
@@ -141,6 +358,8 @@ func FromInstallConfig(ic installConfig, decrypt Decrypter) (Config, error) {
 		Port:             ic.Port,
 		MaxMessageLength: ic.MaxMessageLength,
 		ReactionEmoji:    strings.TrimSpace(ic.ReactionEmoji),
+		AllowFrom:        allowlistFromStored(ic.AllowFrom),
+		GroupAllowFrom:   allowlistFromStored(ic.GroupAllowFrom),
 	}
 	if c.AppID == "" {
 		return Config{}, errors.New("tuitui: installation config missing app_id")
