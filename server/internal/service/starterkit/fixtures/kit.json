@@ -1,0 +1,1103 @@
+{
+  "agents": [
+    {
+      "avatar_url": "emoji:🚀",
+      "description": "逐条验收准则对照实现抽查。",
+      "instructions": "agents/ac-sampling.md",
+      "key": "ac-sampling",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "AC 抽查",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "test-driven-development"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🦁",
+      "description": "产出界面基线、设计令牌与组件状态矩阵。",
+      "instructions": "agents/ui-design.md",
+      "key": "ui-design",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "UI 设计",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "api-and-interface-design",
+        "bmad-ux",
+        "kit-2a-ui-design",
+        "kit-entry",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🚀",
+      "description": "只跑验证命令并收集证据。",
+      "instructions": "agents/verify-run.md",
+      "key": "verify-run",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "verify 执行",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "diagnosing-bugs"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐙",
+      "description": "研发交付链路的调度者：分配、监督与汇总，不亲自执行阶段工作。",
+      "instructions": "agents/delivery-dispatch.md",
+      "key": "delivery-dispatch",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "交付总调度",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-automation",
+        "kit-entry",
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🤖",
+      "description": "多视角审查代码与产物，产出审查结论。",
+      "instructions": "agents/code-review.md",
+      "key": "code-review",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "代码审查",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "code-review",
+        "diagnosing-bugs",
+        "kit-6-review",
+        "kit-entry",
+        "kit-rules",
+        "performance-optimization",
+        "security-and-hardening"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐨",
+      "description": "拆任务、排依赖与波次，逐 task 判定能否自动化。",
+      "instructions": "agents/task-breakdown.md",
+      "key": "task-breakdown",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "任务拆解",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-3-task",
+        "kit-entry",
+        "kit-rules",
+        "planning-and-task-breakdown"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐳",
+      "description": "只产出任务间依赖图。",
+      "instructions": "agents/dependency-analysis.md",
+      "key": "dependency-analysis",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "依赖分析",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "planning-and-task-breakdown"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐝",
+      "description": "前端技术决策：框架、组件分层、令牌落地与性能预算。",
+      "instructions": "agents/frontend-architecture.md",
+      "key": "frontend-architecture",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "前端架构",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "api-and-interface-design",
+        "bmad-ux",
+        "performance-optimization"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🦊",
+      "description": "code-kit 专家团 · 前端架构师：框架与构建、组件分层、令牌落地方式、前端性能预算与可访问",
+      "instructions": "agents/frontend-architect.md",
+      "key": "frontend-architect",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "前端架构师",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🐨",
+      "description": "审计漏洞、供应链风险与敏感信息。",
+      "instructions": "agents/security-audit.md",
+      "key": "security-audit",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "安全审计",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "code-review",
+        "git-workflow-and-versioning",
+        "security-and-hardening"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🚀",
+      "description": "code-kit 专家团 · 安全审计师：输入处理与认证鉴权、OWASP Top Ten、敏感数据",
+      "instructions": "agents/security-auditor.md",
+      "key": "security-auditor",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "安全审计师",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🐵",
+      "description": "code-kit 专家团 · 工程效能专家：任务可并行性、CI 与验证成本、自动化可行性",
+      "instructions": "agents/engineering-effectiveness.md",
+      "key": "engineering-effectiveness",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "工程效能专家",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🦋",
+      "description": "在任务边界内实现，薄切片可验证交付。",
+      "instructions": "agents/implementation-engineer.md",
+      "key": "implementation-engineer",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "开发执行",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "incremental-implementation",
+        "kit-4-dev",
+        "kit-entry",
+        "kit-rules",
+        "test-driven-development"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🌙",
+      "description": "数据小队的 leader：数据模型与迁移策略负责人。",
+      "instructions": "agents/data-architect.md",
+      "key": "data-architect",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "数据架构师",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "deprecation-and-migration"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🦉",
+      "description": "常驻做对齐检查，发现漂移触发对齐流程。",
+      "instructions": "agents/doc-align.md",
+      "key": "doc-align",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "文档拉齐",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-automation",
+        "kit-horizontal",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🧠",
+      "description": "code-kit 专家团 · 无障碍专家：可访问性合规、对比度、键盘与读屏路径",
+      "instructions": "agents/accessibility-expert.md",
+      "key": "accessibility-expert",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "无障碍专家",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🧠",
+      "description": "常驻扫描运行日志，判定错误类型与修复准入。",
+      "instructions": "agents/log-scanner.md",
+      "key": "log-scanner",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "日志扫描",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-automation",
+        "kit-horizontal",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐙",
+      "description": "code-kit 专家团 · 架构师：技术可行性、模块边界与依赖方向、跨模块影响、架构一致性",
+      "instructions": "agents/architect.md",
+      "key": "architect",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "架构师",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🦉",
+      "description": "产出技术方案：选型、模块边界、接口契约、风险清单。",
+      "instructions": "agents/architecture-design.md",
+      "key": "architecture-design",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "架构设计",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "api-and-interface-design",
+        "documentation-and-adrs",
+        "kit-2-design",
+        "kit-entry",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🧠",
+      "description": "只产出波次编排与并行度规划。",
+      "instructions": "agents/wave-scheduling.md",
+      "key": "wave-scheduling",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "波次调度",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "incremental-implementation",
+        "planning-and-task-breakdown"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐙",
+      "description": "跑验证命令与 AC 抽查，输出结论与证据。",
+      "instructions": "agents/qa-verifier.md",
+      "key": "qa-verifier",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "测试验证",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "diagnosing-bugs",
+        "kit-5-test",
+        "kit-entry",
+        "kit-rules",
+        "test-driven-development"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🦁",
+      "description": "code-kit 专家团 · 研发负责人：实现取舍、改动面与风险、diff 边界、技术债处置",
+      "instructions": "agents/dev-lead.md",
+      "key": "dev-lead",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "研发负责人",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🐨",
+      "description": "把原始诉求落成变更提案：背景、目标、范围边界与影响面。",
+      "instructions": "agents/change-initiation.md",
+      "key": "change-initiation",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "立项分析",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "grilling",
+        "kit-0-change",
+        "kit-entry",
+        "kit-rules",
+        "planning-and-task-breakdown"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🔥",
+      "description": "按错误类型定向修复。",
+      "instructions": "agents/bug-fix.md",
+      "key": "bug-fix",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "缺陷修复",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-automation",
+        "kit-horizontal",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐵",
+      "description": "按提交标准打提交，维护分支、CI 门禁与发布。",
+      "instructions": "agents/auto-commit.md",
+      "key": "auto-commit",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "自动提交",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-automation",
+        "kit-horizontal",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🦁",
+      "description": "code-kit 专家团 · 资深UI设计师：调性、视觉层次、design tokens、组件状态完整",
+      "instructions": "agents/senior-ui-designer.md",
+      "key": "senior-ui-designer",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "资深UI设计师",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🐸",
+      "description": "code-kit 专家团 · 资深测试工程师：测试金字塔与量化指标、AC 可验证性、覆盖盲区、回归风险",
+      "instructions": "agents/senior-qa-engineer.md",
+      "key": "senior-qa-engineer",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "资深测试工程师",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🦋",
+      "description": "code-kit 专家团 · 资深用户体验官：交互流程、可达性、错误恢复体验、真实使用路径",
+      "instructions": "agents/ux-officer.md",
+      "key": "ux-officer",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "资深用户体验官",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🤖",
+      "description": "code-kit 专家团 · 资深用户评测员：US 是否真实用户视角、AC 的 Given/When/",
+      "instructions": "agents/user-evaluator.md",
+      "key": "user-evaluator",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "资深用户评测员",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🧠",
+      "description": "执行可无停机的 schema 迁移与数据回填。",
+      "instructions": "agents/migration-engineer.md",
+      "key": "migration-engineer",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "迁移工程师",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "deprecation-and-migration",
+        "git-workflow-and-versioning"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🐵",
+      "description": "默认智能体用于处理各种对话和工作 兜底之恩提",
+      "instructions": "agents/general-handler.md",
+      "key": "general-handler",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "通用处理的智能体",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🔥",
+      "description": "集成核对、文档归档与移交。",
+      "instructions": "agents/integration-archive.md",
+      "key": "integration-archive",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "集成归档",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "documentation-and-adrs",
+        "git-workflow-and-versioning",
+        "kit-7-integration",
+        "kit-entry",
+        "kit-horizontal",
+        "kit-rules"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🦉",
+      "description": "把提案变成可验收的需求，逐条写出验收准则。",
+      "instructions": "agents/requirements-analysis.md",
+      "key": "requirements-analysis",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "需求分析",
+      "permission_mode": "public_to",
+      "runtime_mode": "local",
+      "skills": [
+        "bmad-prd",
+        "grilling",
+        "kit-1-requirement",
+        "kit-entry",
+        "kit-rules",
+        "research"
+      ],
+      "visibility": "workspace"
+    },
+    {
+      "avatar_url": "emoji:🌈",
+      "description": "code-kit 专家团 · 领域专家：领域模型正确性、统一语言一致性、业务规则完备性",
+      "instructions": "agents/domain-expert.md",
+      "key": "domain-expert",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "领域专家",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    },
+    {
+      "avatar_url": "emoji:🐧",
+      "description": "code-kit 专家团 · 高级产品经理：需求是否覆盖 CHANGE 范围、v1/v2/out 切",
+      "instructions": "agents/senior-product-manager.md",
+      "key": "senior-product-manager",
+      "max_concurrent_tasks": 15,
+      "model": "",
+      "name": "高级产品经理",
+      "permission_mode": "private",
+      "runtime_mode": "local",
+      "skills": [
+        "kit-roles",
+        "kit-rules"
+      ],
+      "visibility": "private"
+    }
+  ],
+  "skills": [
+    {
+      "description": "架构与接口设计：API 与模块边界、深模块设计、多方案接口对比、代码库架构深化、架构决策文档。",
+      "dir": "skills/api-and-interface-design",
+      "files": [
+        "references/bmad-agent-architect.md",
+        "references/bmad-architecture.md",
+        "references/codebase-design.md",
+        "references/design-an-interface.md",
+        "references/improve-codebase-architecture.md"
+      ],
+      "name": "api-and-interface-design"
+    },
+    {
+      "description": "产品与需求：PRD 撰写与校验、产品简报、PRFAQ 逆向工作法、需求发现与竞品分析。",
+      "dir": "skills/bmad-prd",
+      "files": [
+        "assets/headless-schemas.md",
+        "assets/prd-template.md",
+        "assets/prd-validation-checklist.md",
+        "assets/validation-report-template.html",
+        "customize.toml",
+        "module-manifest.toml",
+        "references/bmad-agent-analyst.md",
+        "references/bmad-agent-pm.md",
+        "references/bmad-prfaq.md",
+        "references/bmad-product-brief.md",
+        "references/headless.md",
+        "references/to-prd.md",
+        "references/validate.md"
+      ],
+      "name": "bmad-prd"
+    },
+    {
+      "description": "UI / UX 与前端：界面与体验规格、一次性原型验证、Web Interface Guidelines 走查。",
+      "dir": "skills/bmad-ux",
+      "files": [
+        "assets/color-themes.md",
+        "assets/design-directions.md",
+        "assets/design-example-editorial.md",
+        "assets/design-example-mobile.md",
+        "assets/design-example-shadcn.md",
+        "assets/excalidraw-wireframe.md",
+        "assets/experience-example-mobile.md",
+        "assets/experience-example-shadcn.md",
+        "assets/headless-schemas.md",
+        "assets/key-screens.md",
+        "assets/validation-report-template.html",
+        "customize.toml",
+        "module-manifest.toml",
+        "references/creative-tools.md",
+        "references/design-md-spec.md",
+        "references/headless.md",
+        "references/validate.md"
+      ],
+      "name": "bmad-ux"
+    },
+    {
+      "description": "代码审查与简化：多轴评审、过度设计审查（ponytail）、质量约束契约、对抗式复核、BMAD 评审与改动走查。",
+      "dir": "skills/code-review",
+      "files": [
+        "agents/openai.yaml",
+        "references/bmad-code-review.md",
+        "references/bmad-review.md",
+        "references/bmad-walkthrough.md",
+        "references/code-review-and-quality.md",
+        "references/code-simplification.md",
+        "references/constraint-driven-development.md",
+        "references/doubt-driven-development.md",
+        "references/ponytail-audit.md",
+        "references/ponytail-debt.md",
+        "references/ponytail-review.md",
+        "references/ponytail.md"
+      ],
+      "name": "code-review"
+    },
+    {
+      "description": "数据与迁移：废弃下线、生产 schema 的 expand/contract 无停机迁移、验证与清理。",
+      "dir": "skills/deprecation-and-migration",
+      "files": [],
+      "name": "deprecation-and-migration"
+    },
+    {
+      "description": "调试与故障恢复：疑难 bug 与性能回归的诊断循环，以及测试失败/构建断裂/环境异常的系统化根因恢复。",
+      "dir": "skills/diagnosing-bugs",
+      "files": [
+        "agents/openai.yaml",
+        "scripts/hitl-loop.template.sh"
+      ],
+      "name": "diagnosing-bugs"
+    },
+    {
+      "description": "文档、知识与写作：ADR、领域模型与统一语言、上下文工程、交接文档、文章与技能写作、仓库 agent 指令。",
+      "dir": "skills/documentation-and-adrs",
+      "files": [
+        "references/bmad-project-context.md",
+        "references/context-engineering.md",
+        "references/domain-modeling.md",
+        "references/edit-article.md",
+        "references/handoff.md",
+        "references/ubiquitous-language.md",
+        "references/writing-beats.md",
+        "references/writing-for-agents.md",
+        "references/writing-fragments.md",
+        "references/writing-great-skills.md",
+        "references/writing-shape.md"
+      ],
+      "name": "documentation-and-adrs"
+    },
+    {
+      "description": "Git 与交付：提交分支与冲突、pre-commit、危险命令护栏、CI/CD 质量门禁、发布清单与回滚。",
+      "dir": "skills/git-workflow-and-versioning",
+      "files": [
+        "references/ci-cd-and-automation.md",
+        "references/git-guardrails-claude-code.md",
+        "references/resolving-merge-conflicts.md",
+        "references/setup-pre-commit.md",
+        "references/shipping-and-launch.md"
+      ],
+      "name": "git-workflow-and-versioning"
+    },
+    {
+      "description": "交互引导与思维工具：质询、访谈、头脑风暴、多角色圆桌、深度追问、教学、向导脚本、BMAD 定制与深化。",
+      "dir": "skills/grilling",
+      "files": [
+        "agents/openai.yaml",
+        "references/bmad-advanced-elicitation.md",
+        "references/bmad-brainstorming.md",
+        "references/bmad-customize.md",
+        "references/bmad-forge-idea.md",
+        "references/bmad-party-mode.md",
+        "references/idea-refine.md",
+        "references/interview-me.md",
+        "references/loop-me.md",
+        "references/teach.md",
+        "references/wait-what.md",
+        "references/wizard.md"
+      ],
+      "name": "grilling"
+    },
+    {
+      "description": "开发执行：按 spec 或工单增量实现，薄切片可验证交付，含 BMAD build 流程。",
+      "dir": "skills/incremental-implementation",
+      "files": [],
+      "name": "incremental-implementation"
+    },
+    {
+      "description": "阶段 0 · CHANGE 立项：自动生成 change-id、架构级二次拦截预检、产出 CHANGE.md（背景/目标/范围边界/影响面/不做的事）。含入口门禁与 G1 需求门 4 专家投票协议。",
+      "dir": "skills/kit-0-change",
+      "files": [
+        "references/templates-CHANGE.md",
+        "references/templates-CONTEXT.md",
+        "references/templates-STATE.md"
+      ],
+      "name": "kit-0-change"
+    },
+    {
+      "description": "阶段 1 · REQUIREMENT 需求：把提案变成可验收需求，逐条 Given/When/Then 验收准则、v1/v2/out 范围切分、非功能性需求、域语言沉淀进 CONTEXT.md。含需求门 4 专家投票协议。",
+      "dir": "skills/kit-1-requirement",
+      "files": [
+        "references/templates-CONTEXT.md",
+        "references/templates-REQUIREMENT.md"
+      ],
+      "name": "kit-1-requirement"
+    },
+    {
+      "description": "阶段 2 · DESIGN 技术设计：技术栈选型（查表式读 tech-stacks 适用矩阵）、模块边界、接口契约、ADR、风险与陷阱、§9 架构沉淀。含 G2 方案门（架构师 Master）投票协议。",
+      "dir": "skills/kit-2-design",
+      "files": [
+        "references/reference-tech-stacks.md",
+        "references/templates-ARCHITECTURE.md",
+        "references/templates-DESIGN.md"
+      ],
+      "name": "kit-2-design"
+    },
+    {
+      "description": "阶段 2a · UI-DESIGN 界面设计：调性、design tokens、组件与状态矩阵、反模式规避、内置零依赖界面基线样例。含 G2a UI 设计门 4 专家投票协议。",
+      "dir": "skills/kit-2a-ui-design",
+      "files": [
+        "references/reference-frontend-engineer-rules.md",
+        "references/reference-ui-aesthetics.md",
+        "references/reference-ui-anti-patterns.md",
+        "references/templates-UI-DESIGN.md"
+      ],
+      "name": "kit-2a-ui-design"
+    },
+    {
+      "description": "阶段 3 · TASK 拆解：拆可独立验证的任务、read_files/write_files 边界、可执行 verify 命令、依赖图与波次、逐 task 自动化投票。含 Task 门 4 专家投票协议。",
+      "dir": "skills/kit-3-task",
+      "files": [
+        "references/templates-LESSONS.md",
+        "references/templates-TASK.md"
+      ],
+      "name": "kit-3-task"
+    },
+    {
+      "description": "阶段 4 · DEV 执行：在任务边界内实现、薄切片增量、schema 变更必伴随迁移、破坏性变更协议、diff 边界自查、断点恢复与 PROGRESS、六维自查。含 G3 代码门（研发负责人 Master）。",
+      "dir": "skills/kit-4-dev",
+      "files": [
+        "references/templates-LESSONS.md",
+        "references/templates-PROGRESS.md",
+        "references/templates-SUMMARY.md"
+      ],
+      "name": "kit-4-dev"
+    },
+    {
+      "description": "阶段 5 · TEST 测试：五轮金字塔（功能/性能/安全/兼容/可观测）执行矩阵、AC 逐条抽查、量化指标判定、UAT 失败自动回 DEV 最多 3 轮。含测试门 4 专家投票协议。",
+      "dir": "skills/kit-5-test",
+      "files": [
+        "references/reference-test-pyramid.md",
+        "references/templates-TEST.md"
+      ],
+      "name": "kit-5-test"
+    },
+    {
+      "description": "阶段 6 · REVIEW 审查：双轮审查（规格实现度 + 代码质量）、跨模型 spot-check、严重项必须修复或人工接受、修复任务清单。含 G4 审查门（资深测试工程师 Master）。",
+      "dir": "skills/kit-6-review",
+      "files": [
+        "references/reference-ui-anti-patterns.md",
+        "references/templates-REVIEW.md"
+      ],
+      "name": "kit-6-review"
+    },
+    {
+      "description": "阶段 7 · INTEGRATION 集成归档：S-align 五层对齐前置、产物完整性核对、LESSONS 提名入库、归档套件与移交。",
+      "dir": "skills/kit-7-integration",
+      "files": [
+        "references/reference-tech-stacks.md",
+        "references/templates-ALIGNMENT.md",
+        "references/templates-LESSONS.md",
+        "references/templates-STATE.md"
+      ],
+      "name": "kit-7-integration"
+    },
+    {
+      "description": "code-kit 多 agent 自动化协作架构：七类 agent 职责、任务流转状态机、澄清式人工介入四类触发、阶段产物提交标准九行表、日志扫描判定 E1-E5 与修复准入三条件、拉齐与 S-align 分工、无常驻能力时的降级策略。",
+      "dir": "skills/kit-automation",
+      "files": [],
+      "name": "kit-automation"
+    },
+    {
+      "description": "code-kit 统一入口与调度协议：意图语义路由表（22 条规则→阶段/横向命令）、Artifact Preflight 工件门禁表（目标阶段需要哪些上游工件、缺失回哪补）、工件加载预算（SPEC 全读 / REFERENCE 只查节 / 首轮 ≤150 行）、整链路 Token 预算与四挡位（完整/极简/单点/不走闭环）、老项目入场检测（CONTEXT/AGENTS/CLAUDE 探测与六种判决）、路由声明格式、入口自检清单。调度者每轮按此决定派给谁。",
+      "dir": "skills/kit-entry",
+      "files": [
+        "references/CONTEXT.md",
+        "references/STATE.md"
+      ],
+      "name": "kit-entry"
+    },
+    {
+      "description": "code-kit 横向命令（不属任何 change）：D-discovery 议题发现、P-product 产品 PR+原型、S-align 五层对齐、M-health 体检与冗余扫描、I-intel-scan 老项目入场扫描、A-architect 架构梳理、A-evolve 架构演进沉淀、L-restyle 换视觉调性。",
+      "dir": "skills/kit-horizontal",
+      "files": [
+        "references/prompts-A-evolve.md",
+        "references/prompts-I-intel-scan.md",
+        "references/prompts-L-restyle.md",
+        "references/prompts-M-health.md",
+        "references/prompts-P-product.md",
+        "references/prompts-S-align.md",
+        "references/templates-DISCOVERY-SUBTOPIC.md",
+        "references/templates-PRODUCT-DESIGN.md",
+        "references/templates-ROADMAP.md",
+        "references/templates-TOPICS.md"
+      ],
+      "name": "kit-horizontal"
+    },
+    {
+      "description": "code-kit 十二个门禁角色的定义索引：架构师、高级产品经理、资深用户评测员、安全审计师、领域专家、资深UI设计师、资深用户体验官、前端架构师、无障碍专家、工程效能专家、研发负责人、资深测试工程师。每个角色出现在哪些 Gate、边界与投票职责见 references/。",
+      "dir": "skills/kit-roles",
+      "files": [
+        "references/prompts-A-architect.md",
+        "references/prompts-R-前端架构师.md",
+        "references/prompts-R-安全审计师.md",
+        "references/prompts-R-工程效能专家.md",
+        "references/prompts-R-无障碍专家.md",
+        "references/prompts-R-研发负责人.md",
+        "references/prompts-R-资深UI设计师.md",
+        "references/prompts-R-资深测试工程师.md",
+        "references/prompts-R-资深用户体验官.md",
+        "references/prompts-R-资深用户评测员.md",
+        "references/prompts-R-领域专家.md",
+        "references/prompts-R-高级产品经理.md"
+      ],
+      "name": "kit-roles"
+    },
+    {
+      "description": "code-kit 系统级硬规则 R1-R18：token 与重启协议、阶段门、角色红线、提交与产物、测试纪律、反幻觉、范围控制、八道 Gate 与专家投票、Git 安全网、五层对齐、议题发现、多 agent 协作、澄清式人工介入。每个阶段都必须遵守。",
+      "dir": "skills/kit-rules",
+      "files": [
+        "references/SYSTEM.md"
+      ],
+      "name": "kit-rules"
+    },
+    {
+      "description": "性能与可观测性：前后端与查询性能、Core Web Vitals、埋点指标链路追踪与告警。",
+      "dir": "skills/performance-optimization",
+      "files": [
+        "references/observability-and-instrumentation.md"
+      ],
+      "name": "performance-optimization"
+    },
+    {
+      "description": "规划与拆解：任务分解与工单化、分诊、决策地图、spec、史诗与故事、迭代排期、复盘与中途变更。",
+      "dir": "skills/planning-and-task-breakdown",
+      "files": [
+        "references/bmad-correct-course.md",
+        "references/bmad-create-epics-and-stories.md",
+        "references/bmad-discovery-loop.md",
+        "references/bmad-retrospective.md",
+        "references/bmad-spec.md",
+        "references/bmad-sprint-planning.md",
+        "references/decision-mapping.md",
+        "references/request-refactor-plan.md",
+        "references/spec-driven-development.md",
+        "references/to-issues.md",
+        "references/to-questionnaire.md",
+        "references/to-spec.md",
+        "references/to-tickets.md",
+        "references/triage.md",
+        "references/wayfinder.md"
+      ],
+      "name": "planning-and-task-breakdown"
+    },
+    {
+      "description": "调研与信息获取：一手来源调研、BMAD 深度侦察三法、以官方文档为准的实现决策。",
+      "dir": "skills/research",
+      "files": [
+        "agents/openai.yaml"
+      ],
+      "name": "research"
+    },
+    {
+      "description": "专项工具：练习脚手架、Obsidian 库检索、shoehorn 测试迁移、仓库技能体系初始化。",
+      "dir": "skills/scaffold-exercises",
+      "files": [
+        "agents/openai.yaml"
+      ],
+      "name": "scaffold-exercises"
+    },
+    {
+      "description": "安全与合规：输入处理、认证鉴权、OWASP Top Ten、依赖供应链审计与敏感信息排查。",
+      "dir": "skills/security-and-hardening",
+      "files": [],
+      "name": "security-and-hardening"
+    },
+    {
+      "description": "测试与质量验证：红-绿-重构循环、TDD 参考、BMAD 端到端测试生成、交互式 QA 归档。",
+      "dir": "skills/test-driven-development",
+      "files": [],
+      "name": "test-driven-development"
+    }
+  ],
+  "squads": [
+    {
+      "avatar_url": "",
+      "description": "数据模型与迁移：schema 变更评审、expand/contract 无停机迁移。注意上游无专门数据库技能，判据以项目自身约定为准。",
+      "key": "data-squad",
+      "leader": "data-architect",
+      "members": [
+        {
+          "agent": "data-architect",
+          "role": "leader"
+        },
+        {
+          "agent": "migration-engineer",
+          "role": "member"
+        }
+      ],
+      "name": "数据小队"
+    },
+    {
+      "avatar_url": "",
+      "description": "通用研发交付小队：需求、架构、UI、拆解、开发、测试、审查、集成各一名能力主责，加总调度与常驻横向角色（日志扫描 / 缺陷修复 / 自动提交 / 文档拉齐），以及安全审计与前端架构。按能力挂载技能，不绑定任何外部方法论工具包。",
+      "key": "delivery-squad",
+      "leader": "delivery-dispatch",
+      "members": [
+        {
+          "agent": "delivery-dispatch",
+          "role": "leader"
+        },
+        {
+          "agent": "implementation-engineer",
+          "role": "member"
+        },
+        {
+          "agent": "qa-verifier",
+          "role": "member"
+        },
+        {
+          "agent": "log-scanner",
+          "role": "member"
+        },
+        {
+          "agent": "bug-fix",
+          "role": "member"
+        },
+        {
+          "agent": "auto-commit",
+          "role": "member"
+        },
+        {
+          "agent": "doc-align",
+          "role": "member"
+        },
+        {
+          "agent": "change-initiation",
+          "role": "member"
+        },
+        {
+          "agent": "requirements-analysis",
+          "role": "member"
+        },
+        {
+          "agent": "architecture-design",
+          "role": "member"
+        },
+        {
+          "agent": "ui-design",
+          "role": "member"
+        },
+        {
+          "agent": "task-breakdown",
+          "role": "member"
+        },
+        {
+          "agent": "code-review",
+          "role": "member"
+        },
+        {
+          "agent": "integration-archive",
+          "role": "member"
+        },
+        {
+          "agent": "dependency-analysis",
+          "role": "member"
+        },
+        {
+          "agent": "wave-scheduling",
+          "role": "member"
+        },
+        {
+          "agent": "verify-run",
+          "role": "member"
+        },
+        {
+          "agent": "ac-sampling",
+          "role": "member"
+        },
+        {
+          "agent": "security-audit",
+          "role": "member"
+        },
+        {
+          "agent": "frontend-architecture",
+          "role": "member"
+        },
+        {
+          "agent": "architect",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "senior-product-manager",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "user-evaluator",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "security-auditor",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "domain-expert",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "senior-ui-designer",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "ux-officer",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "frontend-architect",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "accessibility-expert",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "engineering-effectiveness",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "dev-lead",
+          "role": "expert-reviewer"
+        },
+        {
+          "agent": "senior-qa-engineer",
+          "role": "expert-reviewer"
+        }
+      ],
+      "name": "研发交付小队"
+    }
+  ]
+}
