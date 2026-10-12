@@ -1366,6 +1366,13 @@ type SquadMember struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type StarterKitSeed struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	KitKey      string             `json:"kit_key"`
+	KitVersion  string             `json:"kit_version"`
+	SeededAt    pgtype.Timestamptz `json:"seeded_at"`
+}
+
 type SysCronExecution struct {
 	ID           pgtype.UUID        `json:"id"`
 	JobName      string             `json:"job_name"`

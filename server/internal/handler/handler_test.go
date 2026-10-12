@@ -2096,10 +2096,12 @@ func TestWorkspaceCRUD(t *testing.T) {
 
 func TestCreateWorkspaceUsesRequestedSlug(t *testing.T) {
 	const slug = "handler-create-workspace-requested"
-	ctx := context.Background()
+	// An interrupted earlier run leaves the slug standing, which would turn this
+	// test into a phantom 409.
+	deleteWorkspaceFixture(t, slug)
 
 	t.Cleanup(func() {
-		testPool.Exec(ctx, `DELETE FROM workspace WHERE slug = $1`, slug)
+		deleteWorkspaceFixture(t, slug)
 	})
 
 	req := newRequest("POST", "/api/workspaces", map[string]string{

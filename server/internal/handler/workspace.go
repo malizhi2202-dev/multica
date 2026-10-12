@@ -19,6 +19,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
+	"github.com/multica-ai/multica/server/internal/service/starterkit"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -290,6 +291,17 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	// be created before its status can be resolved. (MUL-6243)
 	if err := issuestatus.Ensure(r.Context(), qtx, ws.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to seed issue statuses: "+err.Error())
+		return
+	}
+
+	// The bundled starter skills, agents, and squads arrive in this same
+	// transaction, for the reason the status catalog above gives: a workspace is
+	// never observable without its built-ins. Unlike the catalog, this bundle is
+	// a few hundred rows of content the workspace then owns and edits, so it is
+	// imported once per workspace — starter_kit_seed is what stops a restart, or
+	// the startup sweep, from running it a second time over their edits.
+	if _, err := starterkit.Ensure(r.Context(), qtx, ws.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to import bundled skills, agents, and squads: "+err.Error())
 		return
 	}
 

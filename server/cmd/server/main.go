@@ -31,6 +31,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/scheduler"
 	"github.com/multica-ai/multica/server/internal/selfhosttelemetry"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/service/starterkit"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
 	"github.com/multica-ai/multica/server/pkg/llm"
@@ -721,6 +722,13 @@ func main() {
 	// work, so there is no separate queue TTL to tune: a busy runtime keeps its
 	// backlog, and a departed one retires everything it owned at once.
 	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
+	// Bundled starter skills, agents, and squads (internal/service/starterkit):
+	// import the bundle into any workspace that has never received it — one that
+	// predates the bundle, or one whose create-workspace hook failed. The claim
+	// row in starter_kit_seed is what makes this a once-per-workspace import
+	// rather than something a restart repeats over rows their admins have since
+	// renamed, extended, and deleted; steady state costs one indexed query each.
+	go starterkit.New(queries, pool).SweepAll(sweepCtx)
 	if telemetryWorker != nil {
 		go telemetryWorker.Run(sweepCtx)
 	}

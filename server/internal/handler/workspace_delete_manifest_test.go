@@ -119,6 +119,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"skill_to_label":                     workspaceDelete,
 	"squad":                              workspaceDelete,
 	"squad_member":                       workspaceDelete,
+	"starter_kit_seed":                   workspaceDelete,
 	"sys_cron_executions":                workspaceDeleteKeep,
 	"task_message":                       workspaceDelete,
 	"task_token":                         workspaceDelete,

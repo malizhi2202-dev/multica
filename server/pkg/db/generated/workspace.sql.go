@@ -142,6 +142,11 @@ cleared_issue_properties AS (
 cleared_quick_actions AS (
     DELETE FROM quick_action WHERE workspace_id = $1
 ),
+cleared_starter_kit_claims AS (
+    -- starter_kit_seed has no FK (MUL-3515 §4) and no reaper: left behind, its
+    -- row would outlive the workspace it described with nothing to point at.
+    DELETE FROM starter_kit_seed WHERE workspace_id = $1
+),
 ws_mcp_servers AS (
     SELECT id FROM workspace_mcp_server WHERE workspace_id = $1
 ),
@@ -195,8 +200,9 @@ DELETE FROM workspace WHERE workspace.id = $1
 `
 
 // The channel_* tables (MUL-3515 §4), resource-label junctions, custom issue
-// property definitions, and quick actions carry NO FK to workspace, so — unlike the CASCADE-backed
-// tables the DELETE below sweeps — they are not cleaned up implicitly. Remove
+// property definitions, quick actions, and a workspace's starter-kit claim carry
+// NO FK to workspace, so — unlike the CASCADE-backed tables the DELETE below
+// sweeps — they are not cleaned up implicitly. Remove
 // their workspace-owned rows here so they commit or roll back atomically with
 // the workspace row.
 // VCS tables (migration 213) carry no FK to workspace, so they are not cascaded

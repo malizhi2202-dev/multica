@@ -16,6 +16,41 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+// deleteWorkspaceFixture removes a workspace a test created through
+// CreateWorkspace along with everything that handler writes beside it: the
+// owner member, the seeded issue status catalog, and the bundled starter kit.
+// The schema has no cascades by design, so dropping only the workspace row
+// would leave several hundred rows standing in the shared development database.
+func deleteWorkspaceFixture(t *testing.T, slug string) {
+	t.Helper()
+
+	var wsID string
+	err := testPool.QueryRow(context.Background(),
+		`SELECT id FROM workspace WHERE slug = $1`, slug).Scan(&wsID)
+	if err != nil {
+		return // the create never landed, or an earlier cleanup already got it
+	}
+
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`DELETE FROM squad_member WHERE squad_id IN (SELECT id FROM squad WHERE workspace_id = $1)`,
+		`DELETE FROM agent_skill WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = $1)`,
+		`DELETE FROM skill_file WHERE skill_id IN (SELECT id FROM skill WHERE workspace_id = $1)`,
+		`DELETE FROM squad WHERE workspace_id = $1`,
+		`DELETE FROM skill WHERE workspace_id = $1`,
+		`DELETE FROM agent WHERE workspace_id = $1`,
+		`DELETE FROM starter_kit_seed WHERE workspace_id = $1`,
+		`DELETE FROM issue_status WHERE workspace_id = $1`,
+		`DELETE FROM member WHERE workspace_id = $1`,
+		`DELETE FROM workspace WHERE id = $1`,
+	} {
+		if _, err := testPool.Exec(ctx, stmt, wsID); err != nil {
+			t.Errorf("cleanup workspace %s: %v: %v", slug, stmt, err)
+			return
+		}
+	}
+}
+
 func TestCreateWorkspace_RejectsReservedSlug(t *testing.T) {
 	// Drive the test off the actual reservedSlugs map so the test can never
 	// drift from the source of truth. New entries are covered automatically.
@@ -62,7 +97,7 @@ func TestCreateWorkspace_DoesNotMarkOnboarded(t *testing.T) {
 	_, _ = testPool.Exec(ctx, `UPDATE "user" SET onboarded_at = NULL WHERE id = $1`, testUserID)
 
 	t.Cleanup(func() {
-		_, _ = testPool.Exec(context.Background(), `DELETE FROM workspace WHERE slug = $1`, slug)
+		deleteWorkspaceFixture(t, slug)
 		_, _ = testPool.Exec(context.Background(), `UPDATE "user" SET onboarded_at = NULL WHERE id = $1`, testUserID)
 	})
 
@@ -1423,10 +1458,11 @@ func TestCreateWorkspace_ChineseNameDerivesPrefixFromSlug(t *testing.T) {
 		t.Skip("database not available")
 	}
 
-	ctx := context.Background()
 	const slug = "handler-tests-frontend-team"
-	_, _ = testPool.Exec(ctx, `DELETE FROM workspace WHERE slug = $1`, slug)
-	dbfx.Cleanup(t, `DELETE FROM workspace WHERE slug = $1`, slug)
+	// The shared teardown has to reach the dependents CreateWorkspace writes —
+	// member, status catalog, and the bundled starter kit — not just the row.
+	deleteWorkspaceFixture(t, slug)
+	t.Cleanup(func() { deleteWorkspaceFixture(t, slug) })
 
 	req := newRequest("POST", "/api/workspaces", map[string]any{
 		"name": "前端团队",
@@ -1451,10 +1487,11 @@ func TestCreateWorkspace_HonorsExplicitIssuePrefix(t *testing.T) {
 		t.Skip("database not available")
 	}
 
-	ctx := context.Background()
 	const slug = "handler-tests-explicit-prefix"
-	_, _ = testPool.Exec(ctx, `DELETE FROM workspace WHERE slug = $1`, slug)
-	dbfx.Cleanup(t, `DELETE FROM workspace WHERE slug = $1`, slug)
+	// The shared teardown has to reach the dependents CreateWorkspace writes —
+	// member, status catalog, and the bundled starter kit — not just the row.
+	deleteWorkspaceFixture(t, slug)
+	t.Cleanup(func() { deleteWorkspaceFixture(t, slug) })
 
 	req := newRequest("POST", "/api/workspaces", map[string]any{
 		"name":         "前端团队",
