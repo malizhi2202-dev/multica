@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -183,7 +184,44 @@ func cleanupHandlerTestFixture(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, handlerTestEmail); err != nil {
 		return err
 	}
+	// Tests tear a workspace down with a direct DELETE, which skips the handler's
+	// teardown sweep — the only code that reaches the tables with no FK to
+	// workspace. What that leaves is unreachable through the product (every
+	// workspace-scoped query resolves the workspace first), so it never goes away
+	// on its own: the suite's own status catalog alone was 7 rows per run. Prune
+	// the manifest's workspace-owned set on the way out.
+	orphans, err := testutil.PruneOrphanedWorkspaceRows(ctx, pool, workspaceOwnedTables())
+	if err != nil {
+		return err
+	}
+	if orphans > 0 {
+		fmt.Printf("Pruned %d row(s) orphaned by direct workspace deletes\n", orphans)
+	}
 	return nil
+}
+
+// workspaceOwnedTables is the deletion manifest's own answer to "which tables
+// does a workspace own": every row it marks workspaceDelete in a table with no FK
+// is one the handler sweep reaches, and so must a test that deletes the workspace
+// itself. Keep it sorted so a prune failure names the same table every time.
+//
+// Source-context object intents are the one workspace-owned table left out, and not
+// by oversight: a running server reaps them on a timer, so leftovers there are
+// transient, and tests that exercise that sweeper assert on the global pending set
+// the prune would be reaching into. Only prune what would otherwise sit unreachable
+// forever.
+func workspaceOwnedTables() []string {
+	reapedByServer := map[string]bool{
+		"issue_source_context_object_intent": true,
+	}
+	tables := make([]string, 0, len(workspaceDeletionManifest))
+	for table, action := range workspaceDeletionManifest {
+		if action == workspaceDelete && !reapedByServer[table] {
+			tables = append(tables, table)
+		}
+	}
+	sort.Strings(tables)
+	return tables
 }
 
 func newRequest(method, path string, body any) *http.Request {
