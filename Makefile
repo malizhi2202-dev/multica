@@ -1,4 +1,4 @@
-.PHONY: help makehelp dev server daemon cli multica build test migrate-up migrate-down sqlc seed clean setup start stop check worktree-env setup-main start-main stop-main check-main setup-worktree start-worktree stop-worktree check-worktree remove-worktree db-up db-down db-drop db-reset selfhost selfhost-build selfhost-stop up down status list destroy gc env-exec api-dev web-dev desktop-dev
+.PHONY: help makehelp dev server daemon cli multica build test migrate-up migrate-down sqlc seed clean setup start stop check worktree-env setup-main start-main stop-main check-main setup-worktree start-worktree stop-worktree check-worktree remove-worktree db-up db-down db-drop db-reset selfhost selfhost-build selfhost-stop up down status list destroy gc env-exec api-dev web-dev desktop-dev kit-export kit-check
 
 MAIN_ENV_FILE ?= .env
 WORKTREE_ENV_FILE ?= .env.worktree
@@ -362,6 +362,24 @@ migrate-down: ## Create the target DB if needed, then roll back database migrati
 
 sqlc: ## Regenerate sqlc code
 	cd server && go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate
+
+# The embedded starter kit is generated source too: refresh it from a workspace
+# that already holds the skills, agents, and squads you want handed to new
+# workspaces, review the diff, and commit. kit-check asks the same question
+# without writing anything.
+kit-export: ## Regenerate the embedded starter kit fixtures (KIT_WORKSPACE=<slug>)
+	$(REQUIRE_ENV)
+	@if [ -z "$(KIT_WORKSPACE)" ]; then \
+		echo "usage: make kit-export KIT_WORKSPACE=<workspace slug or id>"; exit 2; \
+	fi
+	cd server && go run ./cmd/kit-export -workspace "$(KIT_WORKSPACE)"
+
+kit-check: ## Report whether the starter kit fixtures match a workspace (KIT_WORKSPACE=<slug>)
+	$(REQUIRE_ENV)
+	@if [ -z "$(KIT_WORKSPACE)" ]; then \
+		echo "usage: make kit-check KIT_WORKSPACE=<workspace slug or id>"; exit 2; \
+	fi
+	cd server && go run ./cmd/kit-export -workspace "$(KIT_WORKSPACE)" -check
 
 # Cleanup
 ##@ Cleanup

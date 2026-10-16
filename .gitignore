@@ -46,6 +46,7 @@ server/tmp/
 server/migrate
 server/daemon
 server/multica
+server/kit-export
 
 # Test artifacts
 test-results/
