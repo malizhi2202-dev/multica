@@ -85,6 +85,20 @@ func Classify(rawError string) Reason {
 	case strings.Contains(lower, concurrentRequestLimitWitness):
 		return ReasonAgentProviderCapacityOrRateLimit
 
+	// Codex CLI resolves the account's workspace backend origin before it
+	// starts a turn ("workspace routing discovery"). A flaky link turns that
+	// pre-flight step into a failed turn even though nothing the agent did
+	// caused it, so it is transport flakiness and shares provider_network's
+	// retry schedule (MUL-4910's retryable allowlist).
+	case strings.Contains(lower, "workspace routing"):
+		return ReasonAgentProviderNetwork
+
+	// Model selection can be rejected with "Selected model is at capacity"
+	// instead of a 429/529 status, so the generic capacity rule below never
+	// sees it. Same transient condition, same bucket.
+	case strings.Contains(lower, "at capacity"):
+		return ReasonAgentProviderCapacityOrRateLimit
+
 	// 1. Context / token window overflow. Checked early so "token
 	//    limit" doesn't get swallowed by the broader "limit" / "quota"
 	//    rule below.

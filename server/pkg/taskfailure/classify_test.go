@@ -84,6 +84,8 @@ func TestClassifyRules(t *testing.T) {
 		{"rate limit", "rate limit exceeded for tier 3", ReasonAgentProviderCapacityOrRateLimit},
 		{"overloaded", "overloaded_error: please retry", ReasonAgentProviderCapacityOrRateLimit},
 		{"no capacity available", "no capacity available; try again later", ReasonAgentProviderCapacityOrRateLimit},
+		// Codex rejects a model pick without a 429/529 status.
+		{"selected model at capacity", "Selected model is at capacity. Please try a different model.", ReasonAgentProviderCapacityOrRateLimit},
 
 		// 6. Provider 5xx / server error.
 		{"server had an error", "the server had an error processing your request", ReasonAgentProviderServerError},
@@ -102,6 +104,10 @@ func TestClassifyRules(t *testing.T) {
 		{"connection closed with exit status wins over process failure", "claude exited with error: exit status 1\nAPI Error: Connection closed mid-response.", ReasonAgentProviderNetwork},
 		{"error sending request", "error sending request for url (https://api.example.com/v1)", ReasonAgentProviderNetwork},
 		{"unable to connect", "unable to connect to provider", ReasonAgentProviderNetwork},
+		// Codex's per-turn workspace routing discovery is a pre-flight network
+		// step; a flaky link fails the whole turn with this text.
+		{"workspace routing timeout", "workspace routing discovery timed out", ReasonAgentProviderNetwork},
+		{"workspace routing failure", "workspace routing discovery failed", ReasonAgentProviderNetwork},
 		{"dial tcp", "dial tcp 1.2.3.4:443: connect: connection refused", ReasonAgentProviderNetwork},
 		{"connection refused alone", "connection refused", ReasonAgentProviderNetwork},
 		{"connectionrefused single", "ConnectionRefused", ReasonAgentProviderNetwork},

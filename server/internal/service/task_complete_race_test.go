@@ -182,6 +182,7 @@ func TestFailTask_AlreadyFinalized(t *testing.T) {
 // max_attempts=2 (single, immediate retry).
 func TestProviderNetworkRetrySchedule(t *testing.T) {
 	const provNet = "agent_error.provider_network"
+	const capacity = "agent_error.provider_capacity_or_rate_limit"
 
 	// Attempt ceiling: provider_network is raised to 3, but only ever WIDENS the
 	// budget and never overrides the max_attempts<=1 "retry disabled" contract.
@@ -193,6 +194,8 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 		{provNet, 2, providerNetworkMaxAttempts}, // default budget → raised to 3
 		{provNet, 1, 1},                          // disabled → stays disabled, not revived
 		{provNet, 5, 5},                          // higher configured budget → kept (widen-only)
+		{capacity, 2, providerNetworkMaxAttempts}, // capacity shares the 3-tier ceiling
+		{capacity, 1, 1},                          // never revives a disabled task
 		{"timeout", 2, 2},                        // unrelated reason → column value untouched
 		{"timeout", 1, 1},                        // unrelated + disabled → untouched
 	}
@@ -211,6 +214,8 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 	}{
 		{provNet, 1, 0}, // first failure → immediate retry
 		{provNet, 2, providerNetworkFinalRetryWait}, // second failure → 5s-deferred retry
+		{capacity, 1, 0},                             // capacity retries immediately once
+		{capacity, 2, providerCapacityRetryWait},     // then cools down before the last try
 		{"runtime_offline", 1, runtimeOfflineRetryDeferral},
 		{"timeout", 2, 0}, // unrelated reason → never deferred
 	}
@@ -263,9 +268,10 @@ func TestTaskFailureClassifiers(t *testing.T) {
 		// Transient mid-stream provider disconnect (MUL-4910): retryable, and
 		// resume-safe so the retry continues the truncated conversation.
 		{reason: "agent_error.provider_network", wantType: "agent_error", wantResumeOK: true, wantRetry: true},
-		// Capacity/rate-limit failures keep their existing user-retry posture.
-		// Correcting a misleading auth label must not enable an automatic resend.
-		{reason: "agent_error.provider_capacity_or_rate_limit", wantType: "agent_error", wantResumeOK: true, wantRetry: false},
+		// Capacity/rate-limit failures are transient model-side rejections
+		// ("Selected model is at capacity", 429/529). An unattended squad must
+		// not need a human to restart the chain, so they retry with a cooldown.
+		{reason: "agent_error.provider_capacity_or_rate_limit", wantType: "agent_error", wantResumeOK: true, wantRetry: true},
 		{reason: "runtime_recovery", wantType: "runtime", wantResumeOK: true, wantRetry: true},
 		{reason: "iteration_limit", wantType: "agent_output", wantResumeOK: false, wantRetry: false},
 		{reason: "api_invalid_request", wantType: "agent_error", wantResumeOK: false, wantRetry: false},

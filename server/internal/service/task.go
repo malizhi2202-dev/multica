@@ -5203,6 +5203,11 @@ var retryableReasons = map[string]bool{
 	"codex_semantic_inactivity":                      true,
 	string(taskfailure.ReasonAgentProviderNetwork):   true,
 	string(taskfailure.ReasonSkillBundleUnavailable): true,
+	// Transient model-side capacity rejections ("Selected model is at
+	// capacity", 429/529, "rate limit"). Retried with a cooldown instead of
+	// ending the run: the agent never made a decision to stop, and an
+	// unattended squad otherwise needs a human to restart the chain.
+	string(taskfailure.ReasonAgentProviderCapacityOrRateLimit): true,
 }
 
 // runtime_offline retries start deferred, not queued: their positive fire_at
@@ -5215,12 +5220,14 @@ var retryableReasons = map[string]bool{
 // Transient provider stream cuts (provider_network) get a bespoke three-tier
 // schedule (MUL-4910): first run + immediate retry + one retry deferred ~5s.
 // A blip that survives the immediate retry gets a short cooldown before the
-// final attempt instead of firing back-to-back. Every other retryable reason
-// keeps the task's generic max_attempts ceiling and retries immediately.
+// final attempt instead of firing back-to-back. Model-capacity rejections use
+// the same three-tier shape with a longer cooldown: retrying a saturated model
+// immediately would just fail again and add load.
 const (
 	runtimeOfflineRetryDeferral   = time.Second
 	providerNetworkMaxAttempts    = 3
 	providerNetworkFinalRetryWait = 5 * time.Second
+	providerCapacityRetryWait     = 15 * time.Second
 )
 
 // retryAttemptCeiling reports how many attempts the auto-retry path allows for
@@ -5241,6 +5248,9 @@ func retryAttemptCeiling(reason string, taskMaxAttempts int32) int32 {
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) && taskMaxAttempts < providerNetworkMaxAttempts {
 		return providerNetworkMaxAttempts
 	}
+	if reason == string(taskfailure.ReasonAgentProviderCapacityOrRateLimit) && taskMaxAttempts < providerNetworkMaxAttempts {
+		return providerNetworkMaxAttempts
+	}
 	return taskMaxAttempts
 }
 
@@ -5257,6 +5267,10 @@ func retryDelayForAttempt(reason string, failedAttempt int32) time.Duration {
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) &&
 		failedAttempt >= providerNetworkMaxAttempts-1 {
 		return providerNetworkFinalRetryWait
+	}
+	if reason == string(taskfailure.ReasonAgentProviderCapacityOrRateLimit) &&
+		failedAttempt >= providerNetworkMaxAttempts-1 {
+		return providerCapacityRetryWait
 	}
 	return 0
 }
