@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -28,6 +29,11 @@ const stallSweepRetryIgnored = 2 * time.Hour
 // issue to a human. Three live attempts is enough to show the stall is not
 // transient; more would burn tokens on the same wall.
 const stallSweepMaxAttempts = 3
+
+// stallSweepEscalate is how long a child may stay parked on its own executor's
+// word before the decision is handed to the parent's leader. A parked member is
+// not a decision: it is a question the wrong level was asked.
+const stallSweepEscalate = 5 * time.Minute
 
 // stallChildrenDedup keeps the "never started" reminder from repeating.
 const stallChildrenDedup = 6 * time.Hour
@@ -392,6 +398,7 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 	}
 
 	rearmed += h.sweepStalledReviews(ctx)
+	rearmed += h.sweepEscalations(ctx)
 	rearmed += h.sweepParentsOnUnstartedChild(ctx)
 	if rearmed > 0 {
 		slog.Info("stall sweeper: re-armed idle issues", "count", rearmed)
@@ -705,4 +712,167 @@ LIMIT 1`
 		return ""
 	}
 	return strings.TrimSpace(branch)
+}
+
+// escalatedChildIssuesSQL finds children that stopped on their own assignee's
+// word while the decision belongs one level up.
+//
+// A stage child that cannot decide has one useful move: hand the decision to
+// the parent's leader, on its own issue, so the leader can widen the write set,
+// reorder or close. Parking in `⏳ 等待确认` asks a human directly, which is the
+// wrong door for a member and leaves the issue waiting while the parent keeps
+// discussing at a level the child never sees.
+const escalatedChildIssuesSQL = `
+WITH lastc AS (
+    SELECT DISTINCT ON (issue_id) issue_id, content, created_at, author_type, author_id
+    FROM comment
+    WHERE deleted_at IS NULL
+    ORDER BY issue_id, created_at DESC
+), active AS (
+    SELECT DISTINCT issue_id
+    FROM agent_task_queue
+    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+), last_escalation AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '%<!-- escalate-up:%'
+    GROUP BY issue_id
+), human_reply_after AS (
+    SELECT DISTINCT c.issue_id
+    FROM comment c
+    JOIN comment l ON l.issue_id = c.issue_id AND c.created_at > l.created_at
+    WHERE c.deleted_at IS NULL AND c.author_type = 'member'
+)
+SELECT i.id::text, i.parent_issue_id::text, l.content, l.created_at,
+       EXTRACT(EPOCH FROM (now() - l.created_at))::int AS age_seconds
+FROM issue i
+JOIN lastc l ON l.issue_id = i.id
+LEFT JOIN active a ON a.issue_id = i.id
+LEFT JOIN last_escalation e ON e.issue_id = i.id
+WHERE a.issue_id IS NULL
+  AND i.status IN ('in_progress', 'blocked')
+  AND i.parent_issue_id IS NOT NULL
+  AND i.assignee_type = 'agent' AND i.assignee_id IS NOT NULL
+  AND l.author_type = 'agent' AND l.author_id = i.assignee_id
+  AND (l.content LIKE '⏳%' OR l.content LIKE '⛔%')
+  AND l.created_at < now() - make_interval(secs => $1)
+  AND (e.at IS NULL OR e.at < l.created_at OR e.at < now() - make_interval(secs => $3))
+ORDER BY l.created_at
+LIMIT $2
+`
+
+// sweepEscalations hands a parked child's decision to the parent's leader.
+// One level up, on the child, is the only place the decision can be made
+// without the child waiting for a conversation it cannot see.
+func (h *Handler) sweepEscalations(ctx context.Context) int {
+	rows, err := h.DB.Query(ctx, escalatedChildIssuesSQL,
+		int(stallSweepEscalate.Seconds()), stallSweepBatch, int(stallSweepRetryIgnored.Seconds()))
+	if err != nil {
+		slog.Warn("stall sweeper: escalation query failed", "error", err)
+		return 0
+	}
+	type escalation struct {
+		childID   string
+		parentID  string
+		lastBody  string
+		lastAt    time.Time
+		ageSecond int
+	}
+	var list []escalation
+	for rows.Next() {
+		var e escalation
+		if err := rows.Scan(&e.childID, &e.parentID, &e.lastBody, &e.lastAt, &e.ageSecond); err != nil {
+			slog.Warn("stall sweeper: escalation scan failed", "error", err)
+			continue
+		}
+		list = append(list, e)
+	}
+	rows.Close()
+
+	raised := 0
+	for _, e := range list {
+		childID, err := util.ParseUUID(e.childID)
+		if err != nil {
+			continue
+		}
+		parentID, err := util.ParseUUID(e.parentID)
+		if err != nil {
+			continue
+		}
+		child, err := h.Queries.GetIssue(ctx, childID)
+		if err != nil {
+			continue
+		}
+		parent, err := h.Queries.GetIssue(ctx, parentID)
+		if err != nil {
+			continue
+		}
+		// A human who already answered is the authority; don't route around them.
+		var humanAfter bool
+		_ = h.DB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM comment c
+    WHERE c.issue_id = $1 AND c.deleted_at IS NULL AND c.author_type = 'member'
+      AND c.created_at > (SELECT MAX(created_at) FROM comment WHERE issue_id = $1 AND deleted_at IS NULL)
+)`, child.ID).Scan(&humanAfter)
+		if humanAfter {
+			continue
+		}
+
+		question := summariseEscalation(e.lastBody)
+		commentID := h.postSweepComment(ctx, child, fmt.Sprintf(
+			"升级到父级：本子任务已停 %d 分钟，最后一条是执行角色的结论，决定权在父级负责人。\n"+
+				"待裁决：%s\n"+
+				"父级负责人请**在本 issue** 直接给出结论（扩大写集 / 调整顺序 / 降级 / 关闭并记录原因），或明确写 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。只在父 issue 讨论、不回到本 issue，子任务会一直停在这里。\n"+
+				"<!-- escalate-up:%s -->", e.ageSecond/60, question, e.childID))
+		if commentID == nil {
+			continue
+		}
+		queued := false
+		if parent.AssigneeType.Valid && parent.AssigneeID.Valid {
+			switch parent.AssigneeType.String {
+			case "agent":
+				if _, err := h.TaskService.EnqueueTaskForMention(ctx, child, parent.AssigneeID, *commentID, service.OriginDerived); err == nil {
+					queued = true
+				} else {
+					slog.Warn("stall sweeper: escalation enqueue failed", "issue_id", e.childID, "error", err)
+				}
+			case "squad":
+				if sq, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+					ID:          parent.AssigneeID,
+					WorkspaceID: parent.WorkspaceID,
+				}); err == nil {
+					if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, child, sq.LeaderID, sq.ID, *commentID, service.OriginDerived); err == nil {
+						queued = true
+					}
+				}
+			}
+		}
+		if queued {
+			raised++
+		}
+	}
+	return raised
+}
+
+// summariseEscalation keeps the child's own question, bounded, so the leader
+// reads the actual blocker instead of a paraphrase of it.
+func summariseEscalation(body string) string {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(body, "\n", " "))
+	for _, prefix := range legalParkPrefixes {
+		trimmed = strings.TrimPrefix(trimmed, prefix)
+	}
+	// "⏳ 等待确认：…" leaves "确认：…" behind; the leader should read the
+	// question, not the marker's tail.
+	trimmed = strings.TrimSpace(trimmed)
+	for _, word := range []string{"确认", "审批", "人工"} {
+		for strings.HasPrefix(trimmed, word) {
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, word))
+		}
+	}
+	trimmed = strings.TrimSpace(strings.TrimLeft(trimmed, "：: -—"))
+	if runes := []rune(trimmed); len(runes) > 400 {
+		return string(runes[:400]) + "…"
+	}
+	return trimmed
 }

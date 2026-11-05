@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,5 +111,19 @@ func TestDeadEndIdle(t *testing.T) {
 	}
 	if stallSweepDeadEnd >= stallSweepIdle {
 		t.Errorf("dead-end window %v must be shorter than %v", stallSweepDeadEnd, stallSweepIdle)
+	}
+}
+
+// The leader must read the blocker itself, not a paraphrase of it: the park
+// prefix is stripped and the question is kept, bounded.
+func TestSummariseEscalation(t *testing.T) {
+	got := summariseEscalation("⏳ 等待确认：请把 T01 的 write_files 扩展为包含 evidence/.gitignore\n并授权替换取证记录")
+	want := "请把 T01 的 write_files 扩展为包含 evidence/.gitignore 并授权替换取证记录"
+	if got != want {
+		t.Errorf("summariseEscalation = %q, want %q", got, want)
+	}
+	long := "⛔ 需要人工审批：" + strings.Repeat("长", 600)
+	if out := []rune(summariseEscalation(long)); len(out) != 401 {
+		t.Errorf("long question not bounded: %d runes", len(out))
 	}
 }
