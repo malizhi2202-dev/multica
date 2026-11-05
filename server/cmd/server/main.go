@@ -733,6 +733,9 @@ func main() {
 		go telemetryWorker.Run(sweepCtx)
 	}
 	go runDelegatedFailureRecoverySweeper(sweepCtx, taskSvc)
+	// Advances gated issues that never reached done, so a finished child
+	// cannot hold its parent's stage barrier open forever.
+	go runBarrierSweeper(sweepCtx, h)
 	// Seven-day runtime retention does not share the 30-second liveness tick:
 	// its bounded transactions run independently once per hour, so a slow GC
 	// round cannot delay offline detection or task recovery.
