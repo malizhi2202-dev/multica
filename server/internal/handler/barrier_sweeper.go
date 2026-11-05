@@ -73,8 +73,11 @@ LEFT JOIN kids k ON k.parent_issue_id = i.id
 WHERE i.status IN ('in_progress', 'in_review')
   AND a.issue_id IS NULL
   AND l.created_at < now() - make_interval(secs => $1)
-  AND l.content NOT LIKE '⏳%'
-  AND l.content NOT LIKE '⛔%'
+  -- A wait/approval marker blocks auto-advance only while the work is still
+  -- in_progress. Once the issue is in_review, a later ⏳/⛔ is a response in
+  -- the thread (e.g. a reviewer declining to act, or a clarification), not
+  -- outstanding work: the gate comment already recorded acceptance.
+  AND (i.status = 'in_review' OR (l.content NOT LIKE '⏳%' AND l.content NOT LIKE '⛔%'))
   AND COALESCE(k.unfinished, 0) = 0
 ORDER BY l.created_at
 LIMIT 100
