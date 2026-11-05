@@ -107,6 +107,11 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 		slog.Warn("barrier sweeper: rows iteration failed", "error", err)
 	}
 
+	// Backfill: children that reached done before the handoff existed (or while
+	// the sweeper was down) still owe their parent a result summary. Deduped by
+	// the per-child marker embedded in the comment body.
+	h.backfillChildResultHandoffs(ctx)
+
 	moved := 0
 	for _, raw := range ids {
 		id, err := util.ParseUUID(raw)
@@ -205,8 +210,8 @@ func (h *Handler) postChildResultToParent(ctx context.Context, child db.Issue, g
 		summary = string(runes[:300]) + "…"
 	}
 	content := fmt.Sprintf(
-		"%s子任务结果回传：[#%d %s](mention://issue/%s) 已验收通过并置 done。\n验收摘要：%s\n完整证据见子 issue；请汇总后推进父级。",
-		mention, child.Number, child.Title, uuidToString(child.ID), summary,
+		"%s子任务结果回传：[#%d %s](mention://issue/%s) 已验收通过并置 done。\n验收摘要：%s\n完整证据见子 issue；请汇总后推进父级。\n<!-- handoff:%s -->",
+		mention, child.Number, child.Title, uuidToString(child.ID), summary, uuidToString(child.ID),
 	)
 	if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
 		ID:          dbid.NewV7(),
@@ -218,5 +223,68 @@ func (h *Handler) postChildResultToParent(ctx context.Context, child db.Issue, g
 		Type:        "comment",
 	}); err != nil {
 		slog.Warn("barrier sweeper: parent handoff failed", "parent_id", uuidToString(parent.ID), "error", err)
+	}
+}
+
+// backfillDoneChildrenHandoffsSQL finds done children whose parent is still
+// active and that never received this child's handoff comment.
+const backfillDoneChildrenHandoffsSQL = `
+SELECT c.id::text
+FROM issue c
+JOIN issue p ON p.id = c.parent_issue_id
+JOIN LATERAL (
+    SELECT 1 FROM comment g
+    WHERE g.issue_id = c.id AND g.deleted_at IS NULL AND g.content LIKE '✅ 验收门%'
+    LIMIT 1
+) gate ON true
+WHERE c.status = 'done'
+  AND p.status IN ('in_progress', 'in_review')
+  AND NOT EXISTS (
+    SELECT 1 FROM comment h
+    WHERE h.issue_id = p.id AND h.deleted_at IS NULL
+      AND h.content LIKE '%handoff:' || c.id::text || ' -->%'
+  )
+ORDER BY c.updated_at DESC
+LIMIT 20
+`
+
+// backfillChildResultHandoffs posts the handoff for children that finished
+// before the parent handoff existed. It is idempotent via the embedded marker,
+// so a restart or a repeated tick never duplicates a summary.
+func (h *Handler) backfillChildResultHandoffs(ctx context.Context) {
+	rows, err := h.DB.Query(ctx, backfillDoneChildrenHandoffsSQL)
+	if err != nil {
+		slog.Warn("barrier sweeper: handoff backfill query failed", "error", err)
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	posted := 0
+	for _, raw := range ids {
+		id, err := util.ParseUUID(raw)
+		if err != nil {
+			continue
+		}
+		child, err := h.Queries.GetIssue(ctx, id)
+		if err != nil {
+			continue
+		}
+		var gate string
+		_ = h.DB.QueryRow(ctx,
+			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content LIKE '✅ 验收门%' ORDER BY created_at DESC LIMIT 1`,
+			child.ID).Scan(&gate)
+		h.postChildResultToParent(ctx, child, gate)
+		posted++
+	}
+	if posted > 0 {
+		slog.Info("barrier sweeper: backfilled child result handoffs", "count", posted)
 	}
 }
