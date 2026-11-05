@@ -85,9 +85,12 @@ WITH lastc AS (
     WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-sweep:%'
     GROUP BY issue_id
 ), attempts AS (
+    -- Consecutive attempts, not lifetime history: an issue that was re-armed
+    -- hours ago and has since made progress must not start at the ceiling.
     SELECT issue_id, COUNT(*) AS n
     FROM comment
     WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-sweep:%'
+      AND created_at > now() - interval '3 hours'
     GROUP BY issue_id
 )
 SELECT i.id::text, i.status, l.content, l.created_at,
@@ -103,7 +106,10 @@ WHERE a.issue_id IS NULL
   -- without dispatching anything and then went quiet must be re-armed again,
   -- while a nudge the assignee ignored is retried only after a long backoff.
   AND (n.at IS NULL OR n.at < l.created_at OR n.at < now() - make_interval(secs => $3))
-  AND l.author_type = 'agent'
+  -- The sweeper's own last word must not hide the issue from itself: a handoff
+  -- comment is exactly the state that needs watching, otherwise a failed or
+  -- ignored handoff freezes the issue with no watcher left.
+  AND (l.author_type = 'agent' OR (l.author_type = 'system' AND l.content LIKE '%<!-- %'))
   -- Two idles: a turn that handed off to nobody is a dead end within minutes,
   -- while a turn that did mention someone gets the longer window in case the
   -- dispatch it asked for is still being claimed.
@@ -117,7 +123,9 @@ WHERE a.issue_id IS NULL
   AND NOT EXISTS (
       SELECT 1 FROM comment e
       WHERE e.issue_id = i.id AND e.deleted_at IS NULL
-        AND e.content LIKE '%<!-- stall-escalated:%'
+        AND (e.content LIKE '%<!-- stall-escalated:%' OR e.content LIKE '%<!-- stall-handoff-parent:%')
+        AND e.created_at > l.created_at
+        AND e.created_at > now() - interval '6 hours'
   )
 ORDER BY l.created_at
 LIMIT $2
@@ -344,11 +352,14 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 		}
 
 		if c.Attempts >= stallSweepMaxAttempts {
-			h.postSweepComment(ctx, issue, fmt.Sprintf(
-				"%s停滞移交：本 issue 已自动续跑 %d 次仍在 `%s` 且无运行任务（最后一次进展在 %d 分钟前），机械重试到此为止，交给人工判断。\n"+
-					"请决定：继续推进（可让我按需重跑）、改 `cancelled` 记录原因、或改写验收口径。\n<!-- stall-escalated:%s -->",
-				mention, c.Attempts, issue.Status, minutes, c.ID))
-			slog.Info("stall sweeper: handed to human", "issue_id", c.ID, "attempts", c.Attempts)
+			// Out of mechanical retries. A stage child does not get parked for a
+			// human from here: its decision belongs to the parent's leader, and
+			// a top-level issue is the only shape where a human is the next
+			// rung. Handing a child to a human is how an issue sat waiting for
+			// someone who was never asked.
+			if raised := h.handToParentOrHuman(ctx, issue, mention, c.Attempts, minutes, c.ID); raised {
+				slog.Info("stall sweeper: handed stalled issue up", "issue_id", c.ID, "attempts", c.Attempts)
+			}
 			continue
 		}
 
@@ -399,6 +410,7 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 
 	rearmed += h.sweepStalledReviews(ctx)
 	rearmed += h.sweepEscalations(ctx)
+	rearmed += h.sweepOwnerEscalations(ctx)
 	rearmed += h.sweepParentsOnUnstartedChild(ctx)
 	if rearmed > 0 {
 		slog.Info("stall sweeper: re-armed idle issues", "count", rearmed)
@@ -880,4 +892,187 @@ func summariseEscalation(body string) string {
 		return string(runes[:400]) + "…"
 	}
 	return trimmed
+}
+
+// handToParentOrHuman is the last mechanical rung. A child hands the issue to
+// its parent's leader (on the child, so the ruling lands where the work is); a
+// top-level issue, which has no parent to ask, tells a human. It returns whether
+// a run was enqueued for the parent leader.
+func (h *Handler) handToParentOrHuman(ctx context.Context, issue db.Issue, mention string, attempts, minutes int, marker string) bool {
+	if issue.ParentIssueID.Valid {
+		if parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID); err == nil {
+			if leaderID, squadID, ok := h.parentLeader(ctx, parent); ok {
+				commentID := h.postSweepComment(ctx, issue, fmt.Sprintf(
+					"%s机械续跑 %d 次仍停在 `%s`（最后一次进展在 %d 分钟前），本 issue 作为子任务无法再自决，交回父级。\n"+
+						"父级负责人请**在本 issue** 裁决并给出下一步：谁来做、做什么、做到什么算完成；确实要人等就写 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。\n"+
+						"<!-- stall-handoff-parent:%s -->",
+					mention, attempts, issue.Status, minutes, marker))
+				if commentID == nil {
+					return false
+				}
+				if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, leaderID, squadID, *commentID, service.OriginDerived); err == nil {
+					return true
+				} else if squadID.Valid {
+					slog.Warn("stall sweeper: parent leader enqueue failed", "issue_id", uuidToString(issue.ID), "error", err)
+					return false
+				}
+				if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, leaderID, *commentID, service.OriginDerived); err != nil {
+					slog.Warn("stall sweeper: parent leader enqueue failed", "issue_id", uuidToString(issue.ID), "error", err)
+					return false
+				}
+				return true
+			}
+		}
+	}
+	h.postSweepComment(ctx, issue, fmt.Sprintf(
+		"%s停滞移交：本 issue 已自动续跑 %d 次仍停在 `%s` 且无运行任务（最后一次进展在 %d 分钟前），机械重试到此为止，交给人工判断。\n"+
+			"请决定：继续推进（可让我按需重跑）、改 `cancelled` 记录原因、或改写验收口径。\n<!-- stall-escalated:%s -->",
+		mention, attempts, issue.Status, minutes, marker))
+	return false
+}
+
+// parentLeader resolves the decision-maker of a parent issue: its agent, or the
+// leader of its squad.
+func (h *Handler) parentLeader(ctx context.Context, parent db.Issue) (pgtype.UUID, pgtype.UUID, bool) {
+	if !parent.AssigneeType.Valid || !parent.AssigneeID.Valid {
+		return pgtype.UUID{}, pgtype.UUID{}, false
+	}
+	switch parent.AssigneeType.String {
+	case "agent":
+		return parent.AssigneeID, pgtype.UUID{}, true
+	case "squad":
+		sq, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+			ID:          parent.AssigneeID,
+			WorkspaceID: parent.WorkspaceID,
+		})
+		if err != nil {
+			return pgtype.UUID{}, pgtype.UUID{}, false
+		}
+		return sq.LeaderID, sq.ID, true
+	}
+	return pgtype.UUID{}, pgtype.UUID{}, false
+}
+
+// ownerEscalationSQL finds a child whose handoff to the parent's leader went
+// unanswered: the handoff is the newest word, it is old enough to have been
+// read, nothing is running, and the owner was not told about THIS handoff yet.
+//
+// The rung exists because the previous top rung could still deadlock: a parent
+// leader who never ruled left the child waiting with no one left to ask. One
+// more unanswered handoff is enough — the workspace owner decides, and by then
+// the situation is a statement of fact, not a question.
+const ownerEscalationSQL = `
+WITH lastc AS (
+    SELECT DISTINCT ON (issue_id) issue_id, content, created_at, author_type
+    FROM comment
+    WHERE deleted_at IS NULL
+    ORDER BY issue_id, created_at DESC
+), active AS (
+    SELECT DISTINCT issue_id
+    FROM agent_task_queue
+    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+), handoff AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-handoff-parent:%'
+    GROUP BY issue_id
+), owner_told AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-handoff-owner:%'
+    GROUP BY issue_id
+)
+SELECT i.id::text, i.status, l.content
+FROM issue i
+JOIN lastc l ON l.issue_id = i.id
+JOIN handoff h ON h.issue_id = i.id
+LEFT JOIN active a ON a.issue_id = i.id
+LEFT JOIN owner_told o ON o.issue_id = i.id
+WHERE a.issue_id IS NULL
+  AND i.status IN ('in_progress', 'blocked')
+  AND h.at > l.created_at
+  AND h.at < now() - make_interval(secs => $1)
+  AND (o.at IS NULL OR o.at < h.at)
+ORDER BY h.at
+LIMIT $2
+`
+
+// stallSweepOwnerRung is how long an unanswered handoff to the parent's leader
+// is given before the workspace owner is told.
+const stallSweepOwnerRung = 30 * time.Minute
+
+// sweepOwnerEscalations is the last rung: parent's leader never answered, so
+// the workspace owner gets one concrete decision request.
+func (h *Handler) sweepOwnerEscalations(ctx context.Context) int {
+	rows, err := h.DB.Query(ctx, ownerEscalationSQL, int(stallSweepOwnerRung.Seconds()), stallSweepBatch)
+	if err != nil {
+		slog.Warn("stall sweeper: owner escalation query failed", "error", err)
+		return 0
+	}
+	var ids []string
+	for rows.Next() {
+		var id, status, body string
+		if err := rows.Scan(&id, &status, &body); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	told := 0
+	for _, raw := range ids {
+		id, err := util.ParseUUID(raw)
+		if err != nil {
+			continue
+		}
+		issue, err := h.Queries.GetIssue(ctx, id)
+		if err != nil {
+			continue
+		}
+		var ownerID pgtype.UUID
+		if err := h.DB.QueryRow(ctx,
+			`SELECT user_id FROM member WHERE workspace_id = $1 AND role = 'owner' LIMIT 1`,
+			issue.WorkspaceID).Scan(&ownerID); err != nil {
+			continue
+		}
+		parentText := ""
+		if issue.ParentIssueID.Valid {
+			if parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID); err == nil {
+				parentText = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 的负责人", parent.Number, parent.Title, uuidToString(parent.ID))
+			}
+		}
+		if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+			ID:          dbid.NewV7(),
+			IssueID:     issue.ID,
+			WorkspaceID: issue.WorkspaceID,
+			AuthorType:  "system",
+			AuthorID:    pgtype.UUID{Bytes: [16]byte{}, Valid: true},
+			Content: fmt.Sprintf(
+				"[@%s](mention://member/%s) 需要你定一次：本 issue [#%d %s](mention://issue/%s) 已升级到%s，30 分钟没有裁决，机械兜底到此为止。\n"+
+					"现状：`%s`，无运行任务；机械续跑与父级升级都已试过。\n"+
+					"请二选一：① 给一句裁决（谁做、做什么、做到什么算完成）→ 我继续；② 判定不值得继续 → 把 issue 置 `cancelled` 或改写验收口径。\n"+
+					"默认建议：若只是缺上游产物/授权，直接按现有写集降级交付并在证据里标注缺口，不要继续空转。\n"+
+					"<!-- stall-handoff-owner:%s -->",
+				h.memberName(ctx, ownerID), uuidToString(ownerID), issue.Number, issue.Title,
+				uuidToString(issue.ID), parentText, issue.Status, raw),
+			Type: "comment",
+		}); err != nil {
+			slog.Warn("stall sweeper: owner escalation comment failed", "issue_id", raw, "error", err)
+			continue
+		}
+		told++
+	}
+	if told > 0 {
+		slog.Info("stall sweeper: escalated unanswered handoffs to the workspace owner", "count", told)
+	}
+	return told
+}
+
+// memberName resolves a user's display name for the mention body.
+func (h *Handler) memberName(ctx context.Context, userID pgtype.UUID) string {
+	var name string
+	if err := h.DB.QueryRow(ctx, `SELECT name FROM "user" WHERE id = $1`, userID).Scan(&name); err != nil || name == "" {
+		return "工作区所有者"
+	}
+	return name
 }
