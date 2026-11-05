@@ -97,3 +97,18 @@ func TestReviewNudgeKind(t *testing.T) {
 		}
 	}
 }
+
+// A turn that handed the issue to nobody has no work in flight to wait for, so
+// it is re-armed within minutes; a turn that did name someone gets the longer
+// window in case that dispatch is still being claimed.
+func TestDeadEndIdle(t *testing.T) {
+	if got := deadEndIdle(false); got != stallSweepDeadEnd {
+		t.Errorf("dead end idle = %v, want %v", got, stallSweepDeadEnd)
+	}
+	if got := deadEndIdle(true); got != stallSweepIdle {
+		t.Errorf("mentioned idle = %v, want %v", got, stallSweepIdle)
+	}
+	if stallSweepDeadEnd >= stallSweepIdle {
+		t.Errorf("dead-end window %v must be shorter than %v", stallSweepDeadEnd, stallSweepIdle)
+	}
+}

@@ -19,9 +19,10 @@ import (
 // whole point is that nobody has to notice.
 const stallSweepIdle = 15 * time.Minute
 
-// stallSweepDedup is the quiet period after one nudge before the same issue may
-// be nudged again. A nudge enqueues a run, so this is also the retry cadence.
-const stallSweepDedup = 90 * time.Minute
+// stallSweepRetryIgnored is how long a nudge the assignee never answered is
+// left alone before it is sent again. A nudge enqueues a run, so this is the
+// retry cadence for a run that produced no reply at all.
+const stallSweepRetryIgnored = 2 * time.Hour
 
 // stallSweepMaxAttempts bounds mechanical retries before the sweeper hands the
 // issue to a human. Three live attempts is enough to show the stall is not
@@ -72,11 +73,10 @@ WITH lastc AS (
     SELECT DISTINCT issue_id
     FROM agent_task_queue
     WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
-), nudged AS (
-    SELECT issue_id, COUNT(*) AS n
+), last_nudge AS (
+    SELECT issue_id, MAX(created_at) AS at
     FROM comment
     WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-sweep:%'
-      AND created_at > now() - make_interval(secs => $2)
     GROUP BY issue_id
 ), attempts AS (
     SELECT issue_id, COUNT(*) AS n
@@ -85,16 +85,23 @@ WITH lastc AS (
     GROUP BY issue_id
 )
 SELECT i.id::text, i.status, l.content, l.created_at,
-       COALESCE(att.n, 0) AS attempts
+       COALESCE(att.n, 0) AS attempts,
+       (l.content LIKE '%mention://%') AS has_mention
 FROM issue i
 JOIN lastc l ON l.issue_id = i.id
 LEFT JOIN active a ON a.issue_id = i.id
-LEFT JOIN nudged n ON n.issue_id = i.id
+LEFT JOIN last_nudge n ON n.issue_id = i.id
 LEFT JOIN attempts att ON att.issue_id = i.id
 WHERE a.issue_id IS NULL
-  AND n.issue_id IS NULL
+  -- One nudge per silent stretch, not one per clock window: a round that ended
+  -- without dispatching anything and then went quiet must be re-armed again,
+  -- while a nudge the assignee ignored is retried only after a long backoff.
+  AND (n.at IS NULL OR n.at < l.created_at OR n.at < now() - make_interval(secs => $3))
   AND l.author_type = 'agent'
-  AND l.created_at < now() - make_interval(secs => $1)
+  -- Two idles: a turn that handed off to nobody is a dead end within minutes,
+  -- while a turn that did mention someone gets the longer window in case the
+  -- dispatch it asked for is still being claimed.
+  AND l.created_at < now() - make_interval(secs => LEAST($1::int, $4::int))
   AND i.status IN ('in_progress', 'blocked')
   AND i.assignee_type = 'agent' AND i.assignee_id IS NOT NULL
   AND NOT EXISTS (
@@ -107,7 +114,7 @@ WHERE a.issue_id IS NULL
         AND e.content LIKE '%<!-- stall-escalated:%'
   )
 ORDER BY l.created_at
-LIMIT $3
+LIMIT $2
 `
 
 // stalledCandidate is one issue the sweep may re-arm.
@@ -117,6 +124,22 @@ type stalledCandidate struct {
 	LastComment   string
 	LastCommentAt time.Time
 	Attempts      int
+	// HasMention reports whether the last word mentioned anyone. A turn that
+	// ended without a mention handed the issue to nobody.
+	HasMention bool
+}
+
+// stallSweepDeadEnd is how long a turn that dispatched nobody is given before
+// it is re-armed. It is deliberately short: such a turn did not ask anyone for
+// anything, so there is no work in flight to wait for.
+const stallSweepDeadEnd = 3 * time.Minute
+
+// deadEndIdle is the quiet time this candidate must have before re-arming.
+func deadEndIdle(hasMention bool) time.Duration {
+	if hasMention {
+		return stallSweepIdle
+	}
+	return stallSweepDeadEnd
 }
 
 // parentStuckOnUnstartedChildSQL finds the deadlock shape the leaf sweep cannot
@@ -137,21 +160,25 @@ WITH lastc AS (
     SELECT DISTINCT issue_id
     FROM agent_task_queue
     WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
-), nudged AS (
-    SELECT DISTINCT issue_id
+), last_nudge AS (
+    SELECT issue_id, MAX(created_at) AS at
     FROM comment
     WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-parent:%'
-      AND created_at > now() - make_interval(secs => $2)
+    GROUP BY issue_id
 )
 SELECT p.id::text, p.status, l.content, l.created_at
 FROM issue p
 JOIN lastc l ON l.issue_id = p.id
 LEFT JOIN active a ON a.issue_id = p.id
-LEFT JOIN nudged n ON n.issue_id = p.id
-WHERE a.issue_id IS NULL AND n.issue_id IS NULL
+LEFT JOIN last_nudge n ON n.issue_id = p.id
+WHERE a.issue_id IS NULL
+  AND (n.at IS NULL OR n.at < l.created_at OR n.at < now() - make_interval(secs => $3))
   AND p.status IN ('in_progress', 'in_review')
   AND p.assignee_type IN ('agent', 'squad') AND p.assignee_id IS NOT NULL
   AND l.author_type = 'agent'
+  -- Two idles: a turn that handed off to nobody is a dead end within minutes,
+  -- while a turn that did mention someone gets the longer window in case the
+  -- dispatch it asked for is still being claimed.
   AND l.created_at < now() - make_interval(secs => $1)
   AND NOT EXISTS (
       SELECT 1 FROM comment e
@@ -166,7 +193,7 @@ WHERE a.issue_id IS NULL AND n.issue_id IS NULL
         AND NOT EXISTS (SELECT 1 FROM agent_task_queue t WHERE t.issue_id = c.id)
   )
 ORDER BY l.created_at
-LIMIT $3
+LIMIT $2
 `
 
 // stalledReviewIssuesSQL finds `in_review` leaves whose review state cannot
@@ -187,11 +214,11 @@ WITH lastc AS (
     SELECT DISTINCT issue_id
     FROM agent_task_queue
     WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
-), nudged AS (
-    SELECT DISTINCT issue_id
+), last_nudge AS (
+    SELECT issue_id, MAX(created_at) AS at
     FROM comment
     WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-review:%'
-      AND created_at > now() - make_interval(secs => $2)
+    GROUP BY issue_id
 ), gates AS (
     SELECT issue_id, MAX(created_at) AS gate_at, COUNT(*) AS n
     FROM comment
@@ -206,19 +233,23 @@ SELECT i.id::text, l.content, l.created_at,
 FROM issue i
 JOIN lastc l ON l.issue_id = i.id
 LEFT JOIN active a ON a.issue_id = i.id
-LEFT JOIN nudged nd ON nd.issue_id = i.id
+LEFT JOIN last_nudge nd ON nd.issue_id = i.id
 LEFT JOIN gates g ON g.issue_id = i.id
-WHERE a.issue_id IS NULL AND nd.issue_id IS NULL
+WHERE a.issue_id IS NULL
+  AND (nd.at IS NULL OR nd.at < l.created_at OR nd.at < now() - make_interval(secs => $3))
   AND i.status = 'in_review'
   AND i.assignee_type = 'agent' AND i.assignee_id IS NOT NULL
   AND l.author_type = 'agent'
+  -- Two idles: a turn that handed off to nobody is a dead end within minutes,
+  -- while a turn that did mention someone gets the longer window in case the
+  -- dispatch it asked for is still being claimed.
   AND l.created_at < now() - make_interval(secs => $1)
   AND NOT EXISTS (
       SELECT 1 FROM issue c
       WHERE c.parent_issue_id = i.id AND c.status NOT IN ('done', 'cancelled')
   )
 ORDER BY l.created_at
-LIMIT $3
+LIMIT $2
 `
 
 // reviewNudgeKind names the mechanical reason a review cannot close itself.
@@ -260,7 +291,8 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 	h.reconcileBlockedIssues(ctx)
 
 	rows, err := h.DB.Query(ctx, stalledLeafIssuesSQL,
-		int(stallSweepIdle.Seconds()), int(stallSweepDedup.Seconds()), stallSweepBatch)
+		int(stallSweepIdle.Seconds()), stallSweepBatch, int(stallSweepRetryIgnored.Seconds()),
+		int(stallSweepDeadEnd.Seconds()))
 	if err != nil {
 		slog.Warn("stall sweeper: candidate query failed", "error", err)
 		return 0
@@ -268,7 +300,7 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 	var candidates []stalledCandidate
 	for rows.Next() {
 		var c stalledCandidate
-		if err := rows.Scan(&c.ID, &c.Status, &c.LastComment, &c.LastCommentAt, &c.Attempts); err != nil {
+		if err := rows.Scan(&c.ID, &c.Status, &c.LastComment, &c.LastCommentAt, &c.Attempts, &c.HasMention); err != nil {
 			slog.Warn("stall sweeper: scan failed", "error", err)
 			continue
 		}
@@ -296,6 +328,9 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 		if isLegalParkComment(c.LastComment) {
 			continue
 		}
+		if time.Since(c.LastCommentAt) < deadEndIdle(c.HasMention) {
+			continue
+		}
 		mention := h.issueAssigneeMention(ctx, issue)
 		minutes := int(time.Since(c.LastCommentAt).Minutes())
 		if minutes < 1 {
@@ -312,7 +347,19 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 		}
 
 		var body string
-		if issue.Status == "blocked" {
+		if !c.HasMention {
+			// The specific anti-pattern: a polite, complete-looking report that
+			// hands the issue to nobody. "请负责人/维护者…" names a role, not an
+			// agent, so no run is queued by it.
+			body = fmt.Sprintf(
+				"%s收尾没有接棒人：上一轮结束时既没有 mention 任何 agent，也不是 `⏳ 等待…`/`⛔ 需要人工审批…`，所以没有人会被唤醒（服务端机械巡检，%d 分钟前）。\n"+
+					"本轮必须补上接棒动作，三选一：\n"+
+					"- **能自决** → 直接做：缺环境自建本地替代并标注「本地替代环境」；缺上游产物先 `git merge <上游交付分支>`；写集不够在工作区内申报扩张继续做；缺票就 **mention 每一位投票人**真的发起。\n"+
+					"- **要 agent 接** → `[@名字](mention://agent/<id>)` 真的派出去（写「下一步派 X」不算）。\n"+
+					"- **要人等** → `⏳ 等待确认 <具体问题 + 默认建议 + 影响>`；要审批 → `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。\n"+
+					"只写结论/请「负责人」「维护者」「你们」处理 = 本轮没人接手。\n"+
+					"<!-- stall-sweep:%s -->", mention, minutes, c.ID)
+		} else if issue.Status == "blocked" {
 			body = fmt.Sprintf(
 				"%s阻塞复核：本 issue 标为 `blocked`，已 %d 分钟没有运行任务（服务端机械巡检，不判断对错）。\n"+
 					"`blocked` 只用于「等外部依赖且当前无法自决」；环境缺失、缺上游产物、缺一票都不算。请本轮二选一：\n"+
@@ -326,6 +373,7 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 					"- 缺上游产物（读不到 `.specs` 的 TASK/DESIGN、上游包目录、上游改动）→ 子任务与父级不共享工作树，先把父级已交付分支 `git merge` 进本任务分支再动手（分支名见 `multica issue runs <父 issue>`）；还没有本任务分支时用 `multica repo checkout <repo> --ref <上游交付分支>` 建基线。仍缺才降级实现并标注。\n"+
 					"- 缺环境（DB/认证/日志连不上）→ 自建本地等价替代（本地 DB、合成身份与密钥、mock）走通同一验收路径，证据标注「本地替代环境」；只有不可逆/越权/生产动作才停。\n"+
 					"- 收口用 `✅ 验收门` 后转 `in_review`；确实要人等写 `⏳ 等待确认 <问题>`，需审批写 `⛔ 需要人工审批 <红线>`。除此之外不要以 `⏳`/`⛔` 开头收尾。\n"+
+					"- **收尾必须真的有人被唤醒**：只写结论/请某人确认而不 `mention` 该 agent、也不写等待标记 = 本轮没人接手，issue 会停在这里。要投票就 mention 每位投票人，要授权就 mention 负责人或写 `⛔ 需要人工审批`。\n"+
 					"<!-- stall-sweep:%s -->", mention, minutes, c.ID)
 		}
 		commentID := h.postSweepComment(ctx, issue, body)
@@ -414,7 +462,7 @@ LIMIT 50
 // never started, naming the child so the decision is concrete.
 func (h *Handler) sweepParentsOnUnstartedChild(ctx context.Context) int {
 	rows, err := h.DB.Query(ctx, parentStuckOnUnstartedChildSQL,
-		int(stallSweepIdle.Seconds()), int(stallSweepDedup.Seconds()), stallSweepBatch)
+		int(stallSweepIdle.Seconds()), stallSweepBatch, int(stallSweepRetryIgnored.Seconds()))
 	if err != nil {
 		slog.Warn("stall sweeper: parent query failed", "error", err)
 		return 0
@@ -517,7 +565,7 @@ func (h *Handler) onlyUnstartedChildLabel(ctx context.Context, parent db.Issue) 
 // sweepStalledReviews re-arms reviews that no longer have a closable gate.
 func (h *Handler) sweepStalledReviews(ctx context.Context) int {
 	rows, err := h.DB.Query(ctx, stalledReviewIssuesSQL,
-		int(stallSweepIdle.Seconds()), int(stallSweepDedup.Seconds()), stallSweepBatch)
+		int(stallSweepIdle.Seconds()), stallSweepBatch, int(stallSweepRetryIgnored.Seconds()))
 	if err != nil {
 		slog.Warn("stall sweeper: review query failed", "error", err)
 		return 0
