@@ -1,6 +1,9 @@
 package handler
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // A parked issue is one that legitimately waits on a human. Everything else
 // that merely opens with ⏳/⛔ is work that stopped, and must stay visible to the
@@ -49,6 +52,27 @@ func TestGateAutoAdvanceBlocked(t *testing.T) {
 	for _, tc := range cases {
 		if got := gateAutoAdvanceBlocked(tc.status, tc.lastComment); got != tc.want {
 			t.Errorf("%s: gateAutoAdvanceBlocked(%q, %q) = %v, want %v", tc.name, tc.status, tc.lastComment, got, tc.want)
+		}
+	}
+}
+
+// An acceptance gate that an agent spoke after is history: the issue was
+// reopened for a reason, and re-closing it on the next tick is a regression
+// that already shipped once.
+func TestGateSupersededByAgent(t *testing.T) {
+	gate := time.Date(2026, 11, 5, 17, 17, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		last       time.Time
+		superseded bool
+	}{
+		{"gate is the last agent word", gate, false},
+		{"agent replied after the gate", gate.Add(3 * time.Hour), true},
+		{"agent replied a second earlier", gate.Add(-time.Second), false},
+	}
+	for _, tc := range cases {
+		if got := gateSupersededByAgent(gate, tc.last); got != tc.superseded {
+			t.Errorf("%s: gateSupersededByAgent = %v, want %v", tc.name, got, tc.superseded)
 		}
 	}
 }

@@ -40,8 +40,9 @@ const barrierSweepIdle = 10 * time.Minute
 //
 // Guards are structural: the gate comment must exist, the issue must be
 // in_progress/in_review, no task may be queued/dispatched/running/waiting, the
-// last comment must not be a wait (`⏳`) or approval (`⛔`) marker, and a parent
-// must have no unfinished child.
+// last comment must not be a wait (`⏳`) or approval (`⛔`) marker, no agent may
+// have spoken AFTER the newest gate comment (a gate an agent followed is
+// history, not a verdict), and a parent must have no unfinished child.
 const barrierReadyIssuesSQL = `
 WITH gate AS (
     SELECT issue_id, MAX(created_at) AS gate_at
@@ -64,12 +65,18 @@ WITH gate AS (
     WHERE parent_issue_id IS NOT NULL
     GROUP BY parent_issue_id
 )
-SELECT i.id::text, i.status, l.content
+SELECT i.id::text, i.status, l.content, g.gate_at,
+       COALESCE(la.last_at, g.gate_at) AS last_agent_at
 FROM issue i
 JOIN gate g ON g.issue_id = i.id
 JOIN lastc l ON l.issue_id = i.id
 LEFT JOIN active a ON a.issue_id = i.id
 LEFT JOIN kids k ON k.parent_issue_id = i.id
+LEFT JOIN LATERAL (
+    SELECT MAX(created_at) AS last_at
+    FROM comment
+    WHERE issue_id = i.id AND deleted_at IS NULL AND author_type = 'agent'
+) la ON true
 WHERE i.status IN ('in_progress', 'in_review')
   AND a.issue_id IS NULL
   AND l.created_at < now() - make_interval(secs => $1)
@@ -92,6 +99,15 @@ func gateAutoAdvanceBlocked(status, lastComment string) bool {
 	return strings.HasPrefix(trimmed, "⏳") || strings.HasPrefix(trimmed, "⛔")
 }
 
+// gateSupersededByAgent reports whether an agent spoke after the newest
+// acceptance gate. Such a gate is history, not a verdict: an agent that came
+// back to say "this is not implemented yet" (or to narrow scope) supersedes it.
+// Without this guard the sweep re-closed a reopened child on every tick, since
+// the old gate comment stayed in the thread forever.
+func gateSupersededByAgent(gateAt, lastAgentAt time.Time) bool {
+	return lastAgentAt.After(gateAt)
+}
+
 // SweepBarrierLiveness advances every gated, idle issue to `done` and lets the
 // normal child-done notification close the stage barrier. It returns the number
 // of issues advanced. Called from a server-side ticker; best-effort per row so
@@ -105,11 +121,15 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 	var ids []string
 	for rows.Next() {
 		var id, status, lastComment string
-		if err := rows.Scan(&id, &status, &lastComment); err != nil {
+		var gateAt, lastAgentAt time.Time
+		if err := rows.Scan(&id, &status, &lastComment, &gateAt, &lastAgentAt); err != nil {
 			slog.Warn("barrier sweeper: scan failed", "error", err)
 			continue
 		}
 		if gateAutoAdvanceBlocked(status, lastComment) {
+			continue
+		}
+		if gateSupersededByAgent(gateAt, lastAgentAt) {
 			continue
 		}
 		ids = append(ids, id)
