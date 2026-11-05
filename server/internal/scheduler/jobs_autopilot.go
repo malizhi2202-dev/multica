@@ -35,7 +35,15 @@ const DefaultAutopilotScheduleTimezone = "UTC"
 // tens of seconds; anything beyond this is a stale catch-up and should wait
 // for the next configured slot instead of firing at an arbitrary activation
 // time.
-const maxAutopilotScheduleLateness = 5 * time.Minute
+//
+// 45 minutes covers a suspended laptop or a proxy outage: the scheduler does
+// not tick while the host sleeps, and the plan_time it missed becomes hours
+// old by the time the next tick runs. A narrower window silently dropped the
+// 09:00 daily digest — the occurrence was still the latest one, but it was
+// more than five minutes stale when the host woke at noon. The trade-off is
+// that a long pause may fire one late digest instead of skipping it, which is
+// the behaviour unattended automations want.
+const maxAutopilotScheduleLateness = 45 * time.Minute
 
 // AutopilotScheduleDispatcher is the narrow contract this job needs
 // from service.AutopilotService. Defined here so unit tests in this
