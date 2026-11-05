@@ -755,6 +755,11 @@ WHERE a.issue_id IS NULL
   AND i.assignee_type = 'agent' AND i.assignee_id IS NOT NULL
   AND l.author_type = 'agent' AND l.author_id = i.assignee_id
   AND (l.content LIKE '⏳%' OR l.content LIKE '⛔%')
+  -- A park that names someone is a decision someone was actually given: its own
+  -- task agent, a squad mate, or the workspace owner. Those are legitimate for
+  -- in-scope questions, so only a park that mentions NOBODY is escalated a level
+  -- up — that is the shape with no one left to answer it.
+  AND l.content NOT LIKE '%mention://%'
   AND l.created_at < now() - make_interval(secs => $1)
   AND (e.at IS NULL OR e.at < l.created_at OR e.at < now() - make_interval(secs => $3))
 ORDER BY l.created_at
