@@ -2758,6 +2758,11 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			}
 		}
 		projectCtx.applyTo(&resp)
+		// A child issue gets its own worktree, branched from the repository
+		// default unless the server names a base. Naming the parent's delivered
+		// branch is what lets a stage child read the artifacts its ancestors
+		// already landed instead of reporting them missing every round.
+		resp.BaseRef = h.issueBaseRef(r.Context(), issue)
 
 		// Load every planned input as one chronological, de-duplicated set.
 		// The trigger is included here so the delivery receipt can only contain

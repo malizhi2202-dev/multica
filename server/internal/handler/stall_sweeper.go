@@ -622,3 +622,39 @@ func (h *Handler) postSweepComment(ctx context.Context, issue db.Issue, content 
 	}
 	return &id
 }
+
+// issueBaseRef returns the branch a child issue's worktree should start from:
+// the most recently delivered branch of its parent issue.
+//
+// The structural reason is generic, not tied to one workflow. Every task gets
+// its own checkout, branched from the repository default, so a stage child
+// never sees what its parent delivered afterwards — the specs, packages and
+// migrations the parent landed are simply absent, and the child reports
+// (correctly) that it cannot implement against them. Naming the parent's
+// delivered branch as the starting point is what makes a task sequence
+// cumulative instead of a set of disconnected forks.
+//
+// Only the parent's OWN branch is used, never a sibling's: a sibling's branch
+// carries work that was never integrated under the parent, so basing a child on
+// it would present unreviewed work as the baseline. An empty result means "start
+// from the default branch", which is exactly the previous behaviour.
+func (h *Handler) issueBaseRef(ctx context.Context, issue db.Issue) string {
+	if !issue.ParentIssueID.Valid {
+		return ""
+	}
+	const q = `
+SELECT COALESCE(NULLIF(t.branch_name, ''), '')
+FROM agent_task_queue t
+WHERE t.issue_id = $1
+  AND t.status = 'completed'
+  AND t.completed_at IS NOT NULL
+  AND t.completed_at > now() - interval '14 days'
+  AND NULLIF(t.branch_name, '') IS NOT NULL
+ORDER BY t.completed_at DESC
+LIMIT 1`
+	var branch string
+	if err := h.DB.QueryRow(ctx, q, issue.ParentIssueID).Scan(&branch); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(branch)
+}

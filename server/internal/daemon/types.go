@@ -93,12 +93,19 @@ type Task struct {
 	// order. Rendered into the brief's status-command line; empty (including on
 	// old servers that never send the field) keeps the brief byte-identical to
 	// the built-in-only form. IssueStatusesOmitted is the cap overflow count.
-	IssueStatuses                 []IssueStatusData      `json:"issue_statuses,omitempty"`
-	IssueStatusesOmitted          int                    `json:"issue_statuses_omitted,omitempty"`
-	ThreadName                    string                 `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
-	Agent                         *AgentData             `json:"agent,omitempty"`
-	ConnectedApps                 []ConnectedAppData     `json:"connected_apps,omitempty"` // per-run app capabilities mounted through runtime MCP overlays
-	Repos                         []RepoData             `json:"repos,omitempty"`
+	IssueStatuses        []IssueStatusData  `json:"issue_statuses,omitempty"`
+	IssueStatusesOmitted int                `json:"issue_statuses_omitted,omitempty"`
+	ThreadName           string             `json:"thread_name,omitempty"` // semantic title for provider-native session/thread history
+	Agent                *AgentData         `json:"agent,omitempty"`
+	ConnectedApps        []ConnectedAppData `json:"connected_apps,omitempty"` // per-run app capabilities mounted through runtime MCP overlays
+	Repos                []RepoData         `json:"repos,omitempty"`
+	// BaseRef is the branch this task's worktree should start from instead of
+	// the repository default branch. The server sets it to the parent issue's
+	// most recently delivered branch for a child-issue task: a stage child gets
+	// its own working tree, so without it the parent's landed artifacts (specs,
+	// packages, migrations) are simply absent from the child's checkout. Empty
+	// for top-level issues, chat, autopilot and quick-create tasks.
+	BaseRef                       string                 `json:"base_ref,omitempty"`
 	ProjectID                     string                 `json:"project_id,omitempty"`                       // active project for this task, when present
 	ProjectTitle                  string                 `json:"project_title,omitempty"`                    // human-readable project title for context injection
 	ProjectDescription            string                 `json:"project_description,omitempty"`              // durable project-level context injected into the brief

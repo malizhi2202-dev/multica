@@ -1882,3 +1882,91 @@ func TestIsolatedPrepareKeepsTheReadOnlyBranchDrop(t *testing.T) {
 		t.Error("a turn that changed nothing left its branch behind")
 	}
 }
+
+// A child task gets its own worktree. Without a base ref it starts from the
+// repository default, so anything its parent delivered afterwards is absent —
+// which is what made every stage child report "the specs are not in my
+// checkout". The base ref makes the child's first branch start from the
+// parent's delivered branch instead.
+func TestPrepareLocalWorktreeStartsFromBaseRef(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+
+	// The parent's delivered work: a branch with a file the child will look for.
+	gitRun(t, repo, "checkout", "-b", "agent/j/parent-delivery")
+	writeFile(t, filepath.Join(repo, "parent-delivered.txt"), "landed by the parent\n")
+	gitRun(t, repo, "add", "parent-delivered.txt")
+	gitRun(t, repo, "commit", "-m", "parent delivers the spec")
+	parentTip := gitRun(t, repo, "rev-parse", "HEAD")
+	gitRun(t, repo, "checkout", "main")
+
+	wt, err := PrepareLocalWorktree(LocalWorktreeParams{
+		LocalPath:       repo,
+		EnvRoot:         t.TempDir(),
+		AgentName:       "J",
+		TaskID:          turnOneTask,
+		ConversationKey: "MUL-9100",
+		WorkspaceID:     testBranchOwner.WorkspaceID,
+		AgentID:         testBranchOwner.AgentID,
+		ConversationID:  testBranchOwner.ConversationID,
+		BaseRef:         "agent/j/parent-delivery",
+	}, worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("PrepareLocalWorktree: %v", err)
+	}
+	defer wt.Discard(worktreeTestLogger())
+
+	if got := readFile(t, filepath.Join(wt.WorkDir, "parent-delivered.txt")); got != "landed by the parent\n" {
+		t.Fatalf("child worktree does not carry the parent's delivered file: %q", got)
+	}
+	// The merge commit is this turn's baseline, so the parent's landed files are
+	// never reported as this task's own change set.
+	if wt.BaseCommit == parentTip || wt.BaseCommit == "" {
+		t.Errorf("child base = %q, want the merge commit above the parent tip %s", wt.BaseCommit, parentTip)
+	}
+	if _, err := runGit(wt.Path, "merge-base", "--is-ancestor", parentTip, "HEAD"); err != nil {
+		t.Errorf("parent tip is not an ancestor of the child branch: %v", err)
+	}
+	// The base must be an ancestor, not a detached fork: the parent's commit has
+	// to be part of the child branch's history for a later merge to be trivial.
+	if _, err := runGit(wt.Path, "merge-base", "--is-ancestor", parentTip, "HEAD"); err != nil {
+		t.Errorf("parent tip is not an ancestor of the child branch: %v", err)
+	}
+}
+
+// Continuing a branch keeps its own history, so the parent's later work has to
+// be merged in rather than re-based away. MergeUpstream does that, and it must
+// move the delivery base so the merge itself is not reported as this task's own
+// change set.
+func TestMergeUpstreamBringsParentWorkIntoContinuedBranch(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+
+	first := prepareTurn(t, repo, "MUL-9101", turnOneTask)
+	writeFile(t, filepath.Join(first.WorkDir, "turn-one.txt"), "child work\n")
+	finalizeOK(t, first)
+
+	// The parent lands a spec after the child's branch exists.
+	gitRun(t, repo, "checkout", "-b", "agent/j/parent-delivery")
+	writeFile(t, filepath.Join(repo, "parent-delivered.txt"), "landed later\n")
+	gitRun(t, repo, "add", "parent-delivered.txt")
+	gitRun(t, repo, "commit", "-m", "parent delivers the spec")
+	gitRun(t, repo, "checkout", "main")
+
+	second := prepareTurn(t, repo, "MUL-9101", turnTwoTask)
+	defer second.Discard(worktreeTestLogger())
+	if _, err := os.Stat(filepath.Join(second.WorkDir, "parent-delivered.txt")); err == nil {
+		t.Fatal("precondition: the continued branch already has the parent's file")
+	}
+
+	merged, skipped := second.MergeUpstream("agent/j/parent-delivery", worktreeTestLogger())
+	if !merged {
+		t.Fatalf("MergeUpstream did not merge (skipped: %q)", skipped)
+	}
+	if got := readFile(t, filepath.Join(second.WorkDir, "parent-delivered.txt")); got != "landed later\n" {
+		t.Fatalf("merged worktree is missing the parent's file: %q", got)
+	}
+	if want := gitRun(t, second.Path, "rev-parse", "HEAD"); second.BaseCommit != want {
+		t.Errorf("delivery base = %s, want the merge commit %s", second.BaseCommit, want)
+	}
+}

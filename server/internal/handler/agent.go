@@ -413,6 +413,11 @@ type AgentTaskResponse struct {
 	Agent                *TaskAgentData        `json:"agent,omitempty"`
 	ConnectedApps        []ConnectedAppData    `json:"connected_apps,omitempty"` // daemon-claim only: per-run app capabilities mounted through runtime MCP overlays
 	Repos                []RepoData            `json:"repos,omitempty"`
+	// BaseRef is the branch a child task's worktree should start from: the
+	// parent issue's most recently delivered branch. A stage child does not share
+	// a working tree with its parent, so without this the specs and packages the
+	// parent already landed are absent from the child's checkout.
+	BaseRef string `json:"base_ref,omitempty"`
 	ProjectID            string                `json:"project_id,omitempty"`          // issue's project, when present
 	ProjectTitle         string                `json:"project_title,omitempty"`       // for surfacing in agent context
 	ProjectDescription   string                `json:"project_description,omitempty"` // durable project-level context injected into the brief

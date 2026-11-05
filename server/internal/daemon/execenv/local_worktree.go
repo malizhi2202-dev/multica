@@ -106,6 +106,15 @@ type LocalWorktreeParams struct {
 	WorkspaceID    string
 	AgentID        string
 	ConversationID string
+	// BaseRef is the branch this task's branch should start from instead of
+	// the repository's HEAD — the parent issue's delivered branch, so a child
+	// task starts from the work its ancestors already produced. A stage child
+	// does not share a working tree with its parent, so without this every
+	// child launched from the default branch and could not read the specs or
+	// packages its parent had already landed. Empty keeps the historical
+	// behaviour (start from HEAD); a ref that does not resolve is logged and
+	// treated as empty rather than failing the task.
+	BaseRef string
 }
 
 // owner is the identity a branch created for this task is recorded under.
@@ -481,6 +490,27 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 		}
 	}
 
+	// Bring the parent issue's delivered branch in before the agent reads
+	// anything. Creation always starts from HEAD plus the user's snapshot, so
+	// this merge is what makes a task sequence cumulative: without it a child
+	// gets its own worktree and none of the specs, packages or migrations its
+	// parent already landed.
+	if params.BaseRef != "" {
+		merged, skipped := wt.MergeUpstream(params.BaseRef, logger)
+		switch {
+		case merged:
+			if logger != nil {
+				logger.Info("execenv: merged the issue's base branch into the task branch",
+					"branch", wt.Branch, "base_ref", params.BaseRef, "base", wt.BaseCommit)
+			}
+		case skipped != "":
+			if logger != nil {
+				logger.Warn("execenv: could not merge the issue's base branch; the agent must merge it by hand",
+					"branch", wt.Branch, "base_ref", params.BaseRef, "reason", skipped)
+			}
+		}
+	}
+
 	// Note on keeping sidecars out of the delivered branch: we deliberately do
 	// NOT write .git/info/exclude here. A linked worktree reads info/exclude
 	// from the repo's COMMON git dir, so the only file that would take effect
@@ -503,6 +533,57 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 		)
 	}
 	return wt, nil
+}
+
+// MergeUpstream brings the base branch into this task's branch before the agent
+// runs. A child task continues a branch of its own, so work its parent landed
+// after that branch was created never reached it; merging is the difference
+// between "read the specs" and "the specs are not in your checkout".
+//
+// A merge that conflicts is aborted: the worktree is left exactly as prepared
+// and the caller logs the reason. The agent can still merge by hand — but it
+// then sees a clean tree instead of half-written conflict markers, and the task
+// is not failed over a conflict the user might resolve themselves.
+func (w *LocalWorktree) MergeUpstream(ref string, logger *slog.Logger) (bool, string) {
+	if w == nil || w.Path == "" || ref == "" {
+		return false, ""
+	}
+	if out, err := runGit(w.Path, "rev-parse", "--verify", "--quiet", ref); err != nil || strings.TrimSpace(out) == "" {
+		return false, fmt.Sprintf("base ref %q does not resolve", ref)
+	}
+	// Already containing it: nothing to merge, and no empty merge commit.
+	if _, err := runGit(w.Path, "merge-base", "--is-ancestor", ref, "HEAD"); err == nil {
+		return false, ""
+	}
+	// A replay the agent still has to resolve owns the index; merging on top of
+	// it would mix the two conflicts and neither could be described to the
+	// agent. The protocol tells it to merge upstream by hand in that case.
+	if w.snapshotPending {
+		return false, "the worktree already has an unresolved replay of the user's edits"
+	}
+	if dirty, err := worktreeIsDirty(w.Path); err == nil && dirty {
+		return false, "the worktree has uncommitted changes"
+	}
+	if out, err := runGit(w.Path, "merge", "--no-edit", ref); err != nil {
+		if abortOut, abortErr := runGit(w.Path, "merge", "--abort"); abortErr != nil {
+			// Leaving a conflicted index behind would make every later command
+			// in this checkout surprising, so say so loudly.
+			if logger != nil {
+				logger.Error("execenv: upstream merge failed and could not be aborted",
+					"git_root", w.GitRoot, "branch", w.Branch, "base_ref", ref,
+					"merge_output", out, "abort_output", abortOut, "error", abortErr)
+			}
+			return false, fmt.Sprintf("merge of %q failed and could not be aborted", ref)
+		}
+		return false, fmt.Sprintf("merge of %q conflicts: %s", ref, strings.TrimSpace(out))
+	}
+	// This turn now starts after the merge, so the delivery diff must measure
+	// from here: otherwise the parent's already-landed files would be reported
+	// as this task's own change set.
+	if head, err := runGitTrimmed(w.Path, "rev-parse", "--verify", "HEAD"); err == nil && head != "" {
+		w.BaseCommit = head
+	}
+	return true, ""
 }
 
 // Finalize commits whatever the agent left behind, removes the worktree, and
@@ -1010,6 +1091,15 @@ type branchOwner struct {
 	WorkspaceID    string
 	AgentID        string
 	ConversationID string
+	// BaseRef is the branch this task's branch should start from instead of
+	// the repository's HEAD — the parent issue's delivered branch, so a child
+	// task starts from the work its ancestors already produced. A stage child
+	// does not share a working tree with its parent, so without this every
+	// child launched from the default branch and could not read the specs or
+	// packages its parent had already landed. Empty keeps the historical
+	// behaviour (start from HEAD); a ref that does not resolve is logged and
+	// treated as empty rather than failing the task.
+	BaseRef string
 }
 
 func (o branchOwner) valid() bool {
