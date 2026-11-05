@@ -169,6 +169,71 @@ ORDER BY l.created_at
 LIMIT $3
 `
 
+// stalledReviewIssuesSQL finds `in_review` leaves whose review state cannot
+// resolve itself: either the acceptance gate was superseded by a later agent
+// comment (so the auto-close correctly refuses it), or the issue was moved to
+// review with no gate at all.
+//
+// Both shapes need the assignee, not a gate sweep: the automated close must not
+// guess, and nobody else is going to speak for the issue. A review that had its
+// gate superseded could otherwise sit open forever, holding its parent's stage.
+const stalledReviewIssuesSQL = `
+WITH lastc AS (
+    SELECT DISTINCT ON (issue_id) issue_id, content, created_at, author_type
+    FROM comment
+    WHERE deleted_at IS NULL
+    ORDER BY issue_id, created_at DESC
+), active AS (
+    SELECT DISTINCT issue_id
+    FROM agent_task_queue
+    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+), nudged AS (
+    SELECT DISTINCT issue_id
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '%<!-- stall-review:%'
+      AND created_at > now() - make_interval(secs => $2)
+), gates AS (
+    SELECT issue_id, MAX(created_at) AS gate_at, COUNT(*) AS n
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '✅ 验收门%'
+    GROUP BY issue_id
+)
+SELECT i.id::text, l.content, l.created_at,
+       COALESCE(g.n, 0) AS gates,
+       (SELECT COUNT(*) FROM comment a
+        WHERE a.issue_id = i.id AND a.deleted_at IS NULL AND a.author_type = 'agent'
+          AND a.created_at > COALESCE(g.gate_at, 'epoch'::timestamptz)) AS agent_after_gate
+FROM issue i
+JOIN lastc l ON l.issue_id = i.id
+LEFT JOIN active a ON a.issue_id = i.id
+LEFT JOIN nudged nd ON nd.issue_id = i.id
+LEFT JOIN gates g ON g.issue_id = i.id
+WHERE a.issue_id IS NULL AND nd.issue_id IS NULL
+  AND i.status = 'in_review'
+  AND i.assignee_type = 'agent' AND i.assignee_id IS NOT NULL
+  AND l.author_type = 'agent'
+  AND l.created_at < now() - make_interval(secs => $1)
+  AND NOT EXISTS (
+      SELECT 1 FROM issue c
+      WHERE c.parent_issue_id = i.id AND c.status NOT IN ('done', 'cancelled')
+  )
+ORDER BY l.created_at
+LIMIT $3
+`
+
+// reviewNudgeKind names the mechanical reason a review cannot close itself.
+// "gate" means an agent spoke after the newest gate, so that gate is history;
+// "missing_gate" means the issue was moved to review without one.
+func reviewNudgeKind(gates, agentAfterGate int) string {
+	if gates == 0 {
+		return "missing_gate"
+	}
+	if agentAfterGate > 0 {
+		return "gate"
+	}
+	return ""
+}
+
 // SweepStalledIssues is the mechanical half of liveness: it does not judge
 // output, it just refuses to let an active issue sit with nobody working on it.
 //
@@ -251,14 +316,14 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 			body = fmt.Sprintf(
 				"%s阻塞复核：本 issue 标为 `blocked`，已 %d 分钟没有运行任务（服务端机械巡检，不判断对错）。\n"+
 					"`blocked` 只用于「等外部依赖且当前无法自决」；环境缺失、缺上游产物、缺一票都不算。请本轮二选一：\n"+
-					"- 能自决 → 置回 `in_progress` 继续（缺环境自建本地等价替代并标注「本地替代环境」；缺基线用 `multica repo checkout <repo> --ref <上游交付分支>` 重建，分支名见 `multica issue runs <父 issue>`）。\n"+
+					"- 能自决 → 置回 `in_progress` 继续（缺环境自建本地等价替代并标注「本地替代环境」；缺上游产物先 `git merge <上游交付分支>` 把父级产物并入本任务分支，分支名见 `multica issue runs <父 issue>`）。\n"+
 					"- 真需要人 → 改成 `⏳ 等待确认 <具体问题>` 或 `⛔ 需要人工审批 <红线> + 影响 + 默认建议`，并写明谁/什么条件能解锁。\n"+
 					"<!-- stall-sweep:%s -->", mention, minutes, c.ID)
 		} else {
 			body = fmt.Sprintf(
 				"%s停滞自检：本 issue 已 %d 分钟没有运行任务，仍为 `in_progress`（服务端机械巡检，不判断对错）。\n"+
 					"本轮直接推进，不要只写「下一步」：\n"+
-					"- 缺上游产物（读不到 `.specs` 的 TASK/DESIGN、上游包目录）→ 用 `multica repo checkout <repo> --ref <上游交付分支>` 重建基线（分支名见 `multica issue runs <父 issue>`）；仍缺就按最小完整改动降级实现并标注。\n"+
+					"- 缺上游产物（读不到 `.specs` 的 TASK/DESIGN、上游包目录、上游改动）→ 子任务与父级不共享工作树，先把父级已交付分支 `git merge` 进本任务分支再动手（分支名见 `multica issue runs <父 issue>`）；还没有本任务分支时用 `multica repo checkout <repo> --ref <上游交付分支>` 建基线。仍缺才降级实现并标注。\n"+
 					"- 缺环境（DB/认证/日志连不上）→ 自建本地等价替代（本地 DB、合成身份与密钥、mock）走通同一验收路径，证据标注「本地替代环境」；只有不可逆/越权/生产动作才停。\n"+
 					"- 收口用 `✅ 验收门` 后转 `in_review`；确实要人等写 `⏳ 等待确认 <问题>`，需审批写 `⛔ 需要人工审批 <红线>`。除此之外不要以 `⏳`/`⛔` 开头收尾。\n"+
 					"<!-- stall-sweep:%s -->", mention, minutes, c.ID)
@@ -278,6 +343,7 @@ func (h *Handler) SweepStalledIssues(ctx context.Context) int {
 		rearmed++
 	}
 
+	rearmed += h.sweepStalledReviews(ctx)
 	rearmed += h.sweepParentsOnUnstartedChild(ctx)
 	if rearmed > 0 {
 		slog.Info("stall sweeper: re-armed idle issues", "count", rearmed)
@@ -446,6 +512,75 @@ func (h *Handler) onlyUnstartedChildLabel(ctx context.Context, parent db.Issue) 
 		return ""
 	}
 	return fmt.Sprintf("[#%d %s](mention://issue/%s)", numbers[0], titles[0], ids[0])
+}
+
+// sweepStalledReviews re-arms reviews that no longer have a closable gate.
+func (h *Handler) sweepStalledReviews(ctx context.Context) int {
+	rows, err := h.DB.Query(ctx, stalledReviewIssuesSQL,
+		int(stallSweepIdle.Seconds()), int(stallSweepDedup.Seconds()), stallSweepBatch)
+	if err != nil {
+		slog.Warn("stall sweeper: review query failed", "error", err)
+		return 0
+	}
+	type reviewRow struct {
+		id             string
+		lastComment    string
+		lastCommentAt  time.Time
+		gates          int
+		agentAfterGate int
+	}
+	var reviews []reviewRow
+	for rows.Next() {
+		var r reviewRow
+		if err := rows.Scan(&r.id, &r.lastComment, &r.lastCommentAt, &r.gates, &r.agentAfterGate); err != nil {
+			continue
+		}
+		reviews = append(reviews, r)
+	}
+	rows.Close()
+
+	woken := 0
+	for _, r := range reviews {
+		kind := reviewNudgeKind(r.gates, r.agentAfterGate)
+		if kind == "" {
+			continue
+		}
+		id, err := util.ParseUUID(r.id)
+		if err != nil {
+			continue
+		}
+		issue, err := h.Queries.GetIssue(ctx, id)
+		if err != nil || issue.Status != "in_review" {
+			continue
+		}
+		mention := h.issueAssigneeMention(ctx, issue)
+		minutes := int(time.Since(r.lastCommentAt).Minutes())
+		if minutes < 1 {
+			minutes = 1
+		}
+		var reason string
+		if kind == "gate" {
+			reason = "`✅ 验收门` 之后又出现了智能体评论，旧门禁因此变成历史记录，自动收口不会再依据它"
+		} else {
+			reason = "本 issue 处于 `in_review` 但整个线程没有 `✅ 验收门` 记录"
+		}
+		commentID := h.postSweepComment(ctx, issue, fmt.Sprintf(
+			"%s验收门待补：%s（已 %d 分钟无运行任务，服务端机械巡检）。\n"+
+				"请本轮二选一：\n"+
+				"- 已满足验收 → 重新发一条 `✅ 验收门：AC n/n；TEST/UAT 已附；diff 未越界` 作为本 issue 的**最后一条**评论，服务端随后会自动置 `done` 并回传父级。\n"+
+				"- 未满足 → 置回 `in_progress` 继续，或写 `⏳ 等待确认 <问题>` / `⛔ 需要人工审批 <红线>`。\n"+
+				"<!-- stall-review:%s -->", mention, reason, minutes, r.id))
+		if commentID == nil {
+			continue
+		}
+		if _, err := h.TaskService.RerunIssue(ctx, issue.ID, pgtype.UUID{}, *commentID, pgtype.UUID{},
+			func(db.Agent) bool { return true }); err != nil {
+			slog.Warn("stall sweeper: review rerun failed", "issue_id", r.id, "error", err)
+			continue
+		}
+		woken++
+	}
+	return woken
 }
 
 // issueAssigneeMention renders the assignee mention that carries the wake-up.

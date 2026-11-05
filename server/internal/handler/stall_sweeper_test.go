@@ -76,3 +76,24 @@ func TestGateSupersededByAgent(t *testing.T) {
 		}
 	}
 }
+
+// A review can only close itself through a gate that is still current. Both
+// other shapes need the assignee, and the sweeper has to say which one it is.
+func TestReviewNudgeKind(t *testing.T) {
+	cases := []struct {
+		name           string
+		gates          int
+		agentAfterGate int
+		want           string
+	}{
+		{"no gate at all", 0, 0, "missing_gate"},
+		{"gate is the last agent word", 1, 0, ""},
+		{"agent spoke after the gate", 1, 2, "gate"},
+		{"several gates, agent still spoke last", 3, 1, "gate"},
+	}
+	for _, tc := range cases {
+		if got := reviewNudgeKind(tc.gates, tc.agentAfterGate); got != tc.want {
+			t.Errorf("%s: reviewNudgeKind(%d, %d) = %q, want %q", tc.name, tc.gates, tc.agentAfterGate, got, tc.want)
+		}
+	}
+}
