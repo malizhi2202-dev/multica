@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -125,6 +127,10 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 			slog.Warn("barrier sweeper: advance failed", "issue_id", raw, "error", err)
 			continue
 		}
+		var gate string
+		_ = h.DB.QueryRow(ctx,
+			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content LIKE '✅ 验收门%' ORDER BY created_at DESC LIMIT 1`,
+			prev.ID).Scan(&gate)
 		if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
 			ID:          dbid.NewV7(),
 			IssueID:     prev.ID,
@@ -136,6 +142,9 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 		}); err != nil {
 			slog.Warn("barrier sweeper: comment failed", "issue_id", raw, "error", err)
 		}
+		// Return the result to the parent: the parent must be able to aggregate
+		// a child's acceptance without re-reading the child issue.
+		h.postChildResultToParent(ctx, prev, gate)
 		// Closes the parent's stage barrier when this was the last open child.
 		h.notifyParentOfChildDone(ctx, prev, updated)
 		moved++
@@ -144,4 +153,67 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 		slog.Info("barrier sweeper: advanced gated issues", "count", moved)
 	}
 	return moved
+}
+
+// postChildResultToParent hands a completed child's acceptance summary back to
+// its parent issue, so the parent can synthesize results incrementally instead
+// of waiting for the whole stage barrier and then re-reading every child.
+//
+// The comment is authored by system (zero UUID) and mentions the parent's
+// assignee when it is an agent or a squad, which is what makes the handoff
+// visible in the parent's own thread. It deliberately does NOT enqueue a run:
+// the stage barrier still decides when the parent is woken, so a wide stage
+// does not turn into one parent run per child.
+func (h *Handler) postChildResultToParent(ctx context.Context, child db.Issue, gate string) {
+	if !child.ParentIssueID.Valid {
+		return
+	}
+	parent, err := h.Queries.GetIssue(ctx, child.ParentIssueID)
+	if err != nil {
+		return
+	}
+	switch parent.Status {
+	case "done", "cancelled", "backlog":
+		return
+	}
+
+	mention := ""
+	if parent.AssigneeType.Valid && parent.AssigneeID.Valid {
+		switch parent.AssigneeType.String {
+		case "agent":
+			if ag, err := h.Queries.GetAgent(ctx, parent.AssigneeID); err == nil {
+				mention = fmt.Sprintf("[@%s](mention://agent/%s) ", ag.Name, uuidToString(parent.AssigneeID))
+			}
+		case "squad":
+			if sq, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+				ID:          parent.AssigneeID,
+				WorkspaceID: parent.WorkspaceID,
+			}); err == nil {
+				mention = fmt.Sprintf("[@%s](mention://squad/%s) ", sq.Name, uuidToString(parent.AssigneeID))
+			}
+		}
+	}
+
+	summary := strings.TrimSpace(gate)
+	if summary == "" {
+		summary = "（子任务未留验收摘要）"
+	}
+	if runes := []rune(summary); len(runes) > 300 {
+		summary = string(runes[:300]) + "…"
+	}
+	content := fmt.Sprintf(
+		"%s子任务结果回传：[#%d %s](mention://issue/%s) 已验收通过并置 done。\n验收摘要：%s\n完整证据见子 issue；请汇总后推进父级。",
+		mention, child.Number, child.Title, uuidToString(child.ID), summary,
+	)
+	if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+		ID:          dbid.NewV7(),
+		IssueID:     parent.ID,
+		WorkspaceID: parent.WorkspaceID,
+		AuthorType:  "system",
+		AuthorID:    pgtype.UUID{Bytes: [16]byte{}, Valid: true},
+		Content:     content,
+		Type:        "comment",
+	}); err != nil {
+		slog.Warn("barrier sweeper: parent handoff failed", "parent_id", uuidToString(parent.ID), "error", err)
+	}
 }
