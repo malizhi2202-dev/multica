@@ -64,7 +64,7 @@ WITH gate AS (
     WHERE parent_issue_id IS NOT NULL
     GROUP BY parent_issue_id
 )
-SELECT i.id::text
+SELECT i.id::text, i.status, l.content
 FROM issue i
 JOIN gate g ON g.issue_id = i.id
 JOIN lastc l ON l.issue_id = i.id
@@ -73,15 +73,24 @@ LEFT JOIN kids k ON k.parent_issue_id = i.id
 WHERE i.status IN ('in_progress', 'in_review')
   AND a.issue_id IS NULL
   AND l.created_at < now() - make_interval(secs => $1)
-  -- A wait/approval marker blocks auto-advance only while the work is still
-  -- in_progress. Once the issue is in_review, a later ⏳/⛔ is a response in
-  -- the thread (e.g. a reviewer declining to act, or a clarification), not
-  -- outstanding work: the gate comment already recorded acceptance.
-  AND (i.status = 'in_review' OR (l.content NOT LIKE '⏳%' AND l.content NOT LIKE '⛔%'))
   AND COALESCE(k.unfinished, 0) = 0
 ORDER BY l.created_at
 LIMIT 100
 `
+
+// gateAutoAdvanceBlocked reports whether an issue's own last word forbids the
+// automated close. While the work is still in_progress any marker-shaped last
+// comment (⏳/⛔) means "not finished": a sanctioned wait, a failed round, or a
+// gate rejection all point at outstanding work, and auto-closing on top of one
+// turns an abandoned child into a delivered one. In in_review the gate comment
+// already recorded acceptance, so a later marker is thread conversation.
+func gateAutoAdvanceBlocked(status, lastComment string) bool {
+	if status != "in_progress" {
+		return false
+	}
+	trimmed := strings.TrimSpace(lastComment)
+	return strings.HasPrefix(trimmed, "⏳") || strings.HasPrefix(trimmed, "⛔")
+}
 
 // SweepBarrierLiveness advances every gated, idle issue to `done` and lets the
 // normal child-done notification close the stage barrier. It returns the number
@@ -95,9 +104,12 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 	}
 	var ids []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, status, lastComment string
+		if err := rows.Scan(&id, &status, &lastComment); err != nil {
 			slog.Warn("barrier sweeper: scan failed", "error", err)
+			continue
+		}
+		if gateAutoAdvanceBlocked(status, lastComment) {
 			continue
 		}
 		ids = append(ids, id)
