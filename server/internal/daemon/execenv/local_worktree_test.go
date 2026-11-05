@@ -1970,3 +1970,42 @@ func TestMergeUpstreamBringsParentWorkIntoContinuedBranch(t *testing.T) {
 		t.Errorf("delivery base = %s, want the merge commit %s", second.BaseCommit, want)
 	}
 }
+
+// A baseline merge is not a review. When the parent's delivered branch touches a
+// document the child also edited, taking the whole merge away would leave the
+// child without the specs it needs — the failure this base ref exists to
+// prevent. Conflicts therefore resolve in the delivered branch's favour, and the
+// parent's new files still arrive.
+func TestMergeUpstreamResolvesConflictsInFavourOfTheBase(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+
+	first := prepareTurn(t, repo, "MUL-9102", turnOneTask)
+	writeFile(t, filepath.Join(first.WorkDir, "tracked.txt"), "child edit\n")
+	finalizeOK(t, first)
+
+	// The parent edits the same file and adds a spec the child needs.
+	gitRun(t, repo, "checkout", "-b", "agent/j/parent-delivery")
+	writeFile(t, filepath.Join(repo, "tracked.txt"), "parent edit\n")
+	writeFile(t, filepath.Join(repo, "parent-delivered.txt"), "landed later\n")
+	gitRun(t, repo, "add", "tracked.txt", "parent-delivered.txt")
+	gitRun(t, repo, "commit", "-m", "parent delivers the spec")
+	gitRun(t, repo, "checkout", "main")
+
+	second := prepareTurn(t, repo, "MUL-9102", turnTwoTask)
+	defer second.Discard(worktreeTestLogger())
+
+	merged, skipped := second.MergeUpstream("agent/j/parent-delivery", worktreeTestLogger())
+	if !merged {
+		t.Fatalf("conflicting baseline merge was not applied (skipped: %q)", skipped)
+	}
+	if got := readFile(t, filepath.Join(second.WorkDir, "parent-delivered.txt")); got != "landed later\n" {
+		t.Fatalf("the parent's new file did not arrive: %q", got)
+	}
+	if got := readFile(t, filepath.Join(second.WorkDir, "tracked.txt")); got != "parent edit\n" {
+		t.Errorf("conflicting file = %q, want the delivered branch's version", got)
+	}
+	if _, err := os.Stat(filepath.Join(second.WorkDir, ".git", "MERGE_HEAD")); err == nil {
+		t.Error("worktree was left mid-merge")
+	}
+}

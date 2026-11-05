@@ -565,15 +565,37 @@ func (w *LocalWorktree) MergeUpstream(ref string, logger *slog.Logger) (bool, st
 		return false, "the worktree has uncommitted changes"
 	}
 	if out, err := runGit(w.Path, "merge", "--no-edit", ref); err != nil {
-		if abortOut, abortErr := runGit(w.Path, "merge", "--abort"); abortErr != nil {
-			// Leaving a conflicted index behind would make every later command
-			// in this checkout surprising, so say so loudly.
-			if logger != nil {
-				logger.Error("execenv: upstream merge failed and could not be aborted",
-					"git_root", w.GitRoot, "branch", w.Branch, "base_ref", ref,
-					"merge_output", out, "abort_output", abortOut, "error", abortErr)
+		// A baseline merge is not a review: the child needs the parent's files
+		// to exist, and a textual conflict in a shared document (a STATE log, a
+		// changelog) must not cost it the whole baseline. Resolve conflicts in
+		// favour of the delivered branch and let the agent reconcile its own
+		// edits on top — it is told, in the run, to re-read and re-verify.
+		if _, retryErr := runGit(w.Path, "merge", "--abort"); retryErr == nil {
+			if conflictOut, conflictErr := runGit(w.Path, "merge", "--no-edit", "-X", "theirs", ref); conflictErr == nil {
+				if logger != nil {
+					logger.Warn("execenv: base branch merged with conflicts resolved in its favour",
+						"branch", w.Branch, "base_ref", ref, "conflicts", strings.TrimSpace(out))
+				}
+				_ = conflictOut
+				if head, headErr := runGitTrimmed(w.Path, "rev-parse", "--verify", "HEAD"); headErr == nil && head != "" {
+					w.BaseCommit = head
+				}
+				return true, ""
 			}
-			return false, fmt.Sprintf("merge of %q failed and could not be aborted", ref)
+			// Still stuck: leave a clean tree. The agent merges by hand.
+			abortOut, abortErr := runGit(w.Path, "merge", "--abort")
+			if abortErr != nil {
+				// Leaving a conflicted index behind would make every later command
+				// in this checkout surprising, so say so loudly.
+				if logger != nil {
+					logger.Error("execenv: upstream merge failed and could not be aborted",
+						"git_root", w.GitRoot, "branch", w.Branch, "base_ref", ref,
+						"merge_output", out, "abort_output", abortOut, "error", abortErr)
+				}
+				return false, fmt.Sprintf("merge of %q failed and could not be aborted", ref)
+			}
+			_ = abortOut
+			return false, fmt.Sprintf("merge of %q conflicts: %s", ref, strings.TrimSpace(out))
 		}
 		return false, fmt.Sprintf("merge of %q conflicts: %s", ref, strings.TrimSpace(out))
 	}
