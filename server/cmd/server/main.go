@@ -736,10 +736,10 @@ func main() {
 	// Advances gated issues that never reached done, so a finished child
 	// cannot hold its parent's stage barrier open forever.
 	go runBarrierSweeper(sweepCtx, h)
-	// Re-arms issues that stopped moving (no run and no sanctioned wait marker)
-	// and corrects statuses that contradict a run in flight, so liveness never
-	// depends on a human noticing a board.
-	go runStallSweeper(sweepCtx, h)
+	// Keeps every non-terminal issue live: run, sanctioned wait, or climbed up
+	// the ladder (assignee → parent leader → workspace owner). Corrects statuses
+	// that contradict a run in flight.
+	go runLivenessSweeper(sweepCtx, h)
 	// Seven-day runtime retention does not share the 30-second liveness tick:
 	// its bounded transactions run independently once per hour, so a slow GC
 	// round cannot delay offline detection or task recovery.
