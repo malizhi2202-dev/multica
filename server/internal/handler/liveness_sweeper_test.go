@@ -72,6 +72,7 @@ func TestClimbTarget(t *testing.T) {
 // to sit must classify as nothing-to-do, and every state that is not must have an
 // action. Table-driven so a rule change shows up here first.
 func TestClassifyLiveness(t *testing.T) {
+	pol := DefaultLivenessPolicy()
 	now := time.Date(2026, 11, 6, 1, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 	gate := ago(30 * time.Minute)
@@ -82,99 +83,105 @@ func TestClassifyLiveness(t *testing.T) {
 		want livenessAction
 	}{
 		{
+			name: "a human spoke last: they are the actor",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
+				AgentBody: "T01 仍未通过", MemberAfterAgent: true},
+			want: actNone,
+		},
+		{
 			name: "current gate is accepted, not our job",
-			snap: livenessSnapshot{Status: "in_review", LastAt: ago(time.Hour), LastAuthor: "agent",
-				LastBody: "✅ 验收门：AC 3/3", GateAt: gate, LastAgentAt: gate},
+			snap: livenessSnapshot{Status: "in_review", AgentAt: gate,
+				AgentBody: "✅ 验收门：AC 3/3", GateAt: gate},
 			want: actAccept,
 		},
 		{
 			name: "review with a superseded gate",
-			snap: livenessSnapshot{Status: "in_review", LastAt: ago(time.Hour), LastAuthor: "agent",
-				LastBody: "本轮未能完成", GateAt: gate, LastAgentAt: ago(5 * time.Minute)},
+			snap: livenessSnapshot{Status: "in_review", AgentAt: ago(5 * time.Minute),
+				AgentBody: "本轮未能完成", GateAt: gate},
 			want: actCloseReview,
 		},
 		{
 			name: "review too fresh to nudge",
-			snap: livenessSnapshot{Status: "in_review", LastAt: ago(time.Minute), LastAuthor: "agent",
-				LastBody: "已置 in_review", LastAgentAt: ago(time.Minute)},
+			snap: livenessSnapshot{Status: "in_review", AgentAt: ago(time.Minute),
+				AgentBody: "已置 in_review"},
 			want: actNone,
 		},
 		{
 			name: "parent waiting on a never-started child",
 			snap: livenessSnapshot{Status: "in_progress", OpenKids: 1, UnstartedKids: 1,
-				LastAt: ago(time.Hour), LastAuthor: "agent", LastBody: "等子任务"},
+				AgentAt: ago(time.Hour), AgentBody: "等子任务"},
 			want: actWakeParent,
 		},
 		{
 			name: "parent waiting on a running child is fine",
 			snap: livenessSnapshot{Status: "in_progress", OpenKids: 1, UnstartedKids: 0,
-				LastAt: ago(time.Hour), LastAuthor: "agent", LastBody: "等子任务"},
+				AgentAt: ago(time.Hour), AgentBody: "等子任务"},
 			want: actNone,
 		},
 		{
+			name: "our own nudge after the turn: wait, then climb",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(30 * time.Minute),
+				AgentBody: "工程未完成", MarkerAt: ago(2 * time.Minute)},
+			want: actNone,
+		},
+		{
+			name: "nudge went stale without a reply",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
+				AgentBody: "工程未完成", MarkerAt: ago(time.Hour)},
+			want: actClimb,
+		},
+		{
 			name: "park that named nobody climbs at once",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(time.Minute), LastAuthor: "agent",
-				LastBody: "⏳ 等待确认：请把 write_files 扩到 .gitignore"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(time.Minute),
+				AgentBody: "⏳ 等待确认：请把 write_files 扩到 .gitignore"},
 			want: actClimb,
 		},
 		{
 			name: "park addressed to someone is a real wait",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(5 * time.Minute), LastAuthor: "agent",
-				LastBody: "⏳ 等待确认：请 [@负责人](mention://agent/x) 裁决写集"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(5 * time.Minute),
+				AgentBody: "⏳ 等待确认：请 [@负责人](mention://agent/x) 裁决写集"},
 			want: actNone,
 		},
 		{
 			name: "park addressed to a human is a real wait, however stale",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(3 * time.Hour), LastAuthor: "agent",
-				LastBody: "⏳ 等待确认：[@owner](mention://member/abc) 请提供审核分支"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
+				AgentBody: "⏳ 等待确认：[@owner](mention://member/abc) 请提供审核分支"},
 			want: actNone,
 		},
 		{
 			name: "stale addressed park climbs",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(time.Hour), LastAuthor: "agent",
-				LastBody: "⏳ 等待确认：请 [@负责人](mention://agent/x) 裁决写集"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(time.Hour),
+				AgentBody: "⏳ 等待确认：请 [@负责人](mention://agent/x) 裁决写集"},
 			want: actClimb,
-		},
-		{
-			name: "our own nudge as the last word climbs",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(20 * time.Minute), LastAuthor: "system",
-				LastBody: "[@研发交付小队](mention://squad/x) 停滞自检：本 issue 已 15 分钟没有运行任务"},
-			want: actClimb,
-		},
-		{
-			name: "nudge too fresh to climb",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(2 * time.Minute), LastAuthor: "system",
-				LastBody: "[@研发交付小队](mention://squad/x) 停滞自检"},
-			want: actNone,
 		},
 		{
 			name: "dead end climbs to the assignee within minutes",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(4 * time.Minute), LastAuthor: "agent",
-				LastBody: "T01 继续 BLOCKED，W1/T02 仍锁定"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(4 * time.Minute),
+				AgentBody: "T01 继续 BLOCKED，W1/T02 仍锁定"},
 			want: actWakeAssignee,
 		},
 		{
 			name: "dead end too fresh",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(time.Minute), LastAuthor: "agent",
-				LastBody: "T01 继续 BLOCKED"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(time.Minute),
+				AgentBody: "T01 继续 BLOCKED"},
 			want: actNone,
 		},
 		{
 			name: "turn that named an agent gets the longer window",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(10 * time.Minute), LastAuthor: "agent",
-				LastBody: "请 [@评审](mention://agent/x) 投票"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(10 * time.Minute),
+				AgentBody: "请 [@评审](mention://agent/x) 投票"},
 			want: actNone,
 		},
 		{
 			name: "named agent never took it",
-			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(time.Hour), LastAuthor: "agent",
-				LastBody: "请 [@评审](mention://agent/x) 投票"},
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(time.Hour),
+				AgentBody: "请 [@评审](mention://agent/x) 投票"},
 			want: actWakeAssignee,
 		},
 	}
 
 	for _, tc := range cases {
-		if got := classifyLiveness(tc.snap, now); got != tc.want {
+		if got := classifyLiveness(tc.snap, now, pol); got != tc.want {
 			t.Errorf("%s: classifyLiveness = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -246,5 +253,26 @@ func TestApplyLadder(t *testing.T) {
 		if got := applyLadder(tc.action, tc.rung); got != tc.want {
 			t.Errorf("applyLadder(%v, rung %d) = %v, want %v", tc.action, tc.rung, got, tc.want)
 		}
+	}
+}
+
+// The thresholds must stay in the policy file only, and in the intended order:
+// a turn that left nothing behind is re-armed sooner than one that named someone,
+// and a review still gets its own window. A change here is a deliberate policy
+// change, not an accident.
+func TestLivenessPolicyOrdering(t *testing.T) {
+	pol := DefaultLivenessPolicy()
+	if pol.DeadEndIdle >= pol.AddressedIdle {
+		t.Errorf("dead end %v must be shorter than addressed %v", pol.DeadEndIdle, pol.AddressedIdle)
+	}
+	if pol.ReviewIdle <= pol.DeadEndIdle {
+		t.Errorf("review %v should give the assignee at least the dead-end window %v", pol.ReviewIdle, pol.DeadEndIdle)
+	}
+	if pol.HumanRequestGrace > pol.WaitIdle {
+		t.Errorf("a human request should reach the owner (%v) before the agent ladder climbs (%v)",
+			pol.HumanRequestGrace, pol.WaitIdle)
+	}
+	if pol.Batch <= 0 {
+		t.Errorf("batch must be positive, got %d", pol.Batch)
 	}
 }

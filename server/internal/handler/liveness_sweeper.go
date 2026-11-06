@@ -37,23 +37,7 @@ import (
 //	                                    parent, the workspace owner)
 //	rung 2  the workspace owner       — "the leader did not rule"
 //	stop    nothing further is mechanical; the last rung stays the answer.
-const (
-	// livenessDeadEndIdle is how long a turn that left no successor is left
-	// alone. There is no work in flight to wait for, so this is short.
-	livenessDeadEndIdle = 3 * time.Minute
-	// livenessAddressedIdle is how long a turn that did name someone is left
-	// alone, in case that dispatch is still being claimed.
-	livenessAddressedIdle = 15 * time.Minute
-	// livenessReviewIdle is how long a review without a current gate waits
-	// before its assignee is asked to close it out.
-	livenessReviewIdle = 10 * time.Minute
-	// livenessWaitIdle is how long a sanctioned wait may sit before it counts
-	// as unanswered and the ladder climbs.
-	livenessWaitIdle = 20 * time.Minute
-	// livenessBatch bounds how many issues one tick may act on.
-	livenessBatch = 5
-)
-
+//
 // legalParkPrefixes are the only comment openings that legitimately leave an
 // issue waiting on a human. Anything else that merely starts with ⏳/⛔ is agent
 // shorthand for "this round failed" or "the gate rejected me" and must NOT
@@ -89,17 +73,26 @@ func addressedToMember(content string) bool {
 
 // livenessSnapshot is one issue's observable liveness state. Everything the
 // decision table needs is here, so the table has no queries of its own.
+//
+// Classification reads the last AGENT comment, not simply the last comment: a
+// system note (a child-result handoff, a gate notice) is not turn state, and
+// treating it as one made a parent look "already asked". Our own liveness
+// markers are tracked separately, because those DO mean an actor was woken.
 type livenessSnapshot struct {
 	ID            string
 	Status        string
 	OpenKids      int
 	UnstartedKids int
-	LastBody      string
-	LastAuthor    string // agent | system | member
-	LastAt        time.Time
-	Rung          int
-	GateAt        time.Time
-	LastAgentAt   time.Time
+	// AgentBody/AgentAt are the issue's last agent-authored comment.
+	AgentBody string
+	AgentAt   time.Time
+	// MarkerAt is the newest liveness marker we wrote (rung/owner-asked).
+	MarkerAt time.Time
+	// MemberAfterAgent is true when a human spoke after that agent comment:
+	// they are the actor now, and their comment wakes the assignee itself.
+	MemberAfterAgent bool
+	Rung             int
+	GateAt           time.Time
 }
 
 // livenessAction is what the table decides for one snapshot.
@@ -133,61 +126,63 @@ const (
 //  5. A turn that ended without addressing anyone and without a sanction is a
 //     dead end.
 //  6. Anything still busy or recent enough is left alone.
-func classifyLiveness(s livenessSnapshot, now time.Time) livenessAction {
-	idle := now.Sub(s.LastAt)
-
-	if s.Status == "in_review" && !s.GateAt.Before(s.LastAgentAt) && !s.GateAt.IsZero() {
+func classifyLiveness(s livenessSnapshot, now time.Time, pol LivenessPolicy) livenessAction {
+	// A human spoke after the agent: they are the actor now, and their comment
+	// wakes the assignee itself. Nothing mechanical to do.
+	if s.MemberAfterAgent {
+		return actNone
+	}
+	// A current gate means the work is accepted; closing it is acceptance's job.
+	if s.Status == "in_review" && !s.GateAt.IsZero() && !s.GateAt.Before(s.AgentAt) {
 		return actAccept
 	}
 	if s.OpenKids > 0 {
-		if s.OpenKids == 1 && s.UnstartedKids == 1 && idle >= livenessAddressedIdle {
+		if s.OpenKids == 1 && s.UnstartedKids == 1 && now.Sub(s.AgentAt) >= pol.AddressedIdle {
 			return actWakeParent
 		}
 		// Waiting on children that are running is exactly what a parent should
 		// be doing; the barrier will wake it.
 		return actNone
 	}
+	// We already nudged after this turn: give that nudge its window, then climb.
+	// The marker is the only system comment that means "an actor was asked".
+	if !s.MarkerAt.IsZero() && s.MarkerAt.After(s.AgentAt) {
+		if now.Sub(s.MarkerAt) < pol.AddressedIdle {
+			return actNone
+		}
+		return actClimb
+	}
 	if s.Status == "in_review" {
-		if idle < livenessReviewIdle {
+		if now.Sub(s.AgentAt) < pol.ReviewIdle {
 			return actNone
 		}
 		return actCloseReview
 	}
 
-	if s.LastAuthor == "system" {
-		// The last word is a mechanical nudge: the actor it woke already had its
-		// turn and did not take the issue. Asking the same actor again is the
-		// loop this table exists to break, so climb.
-		if idle >= livenessAddressedIdle {
-			return actClimb
-		}
-		return actNone
-	}
-
-	parked := isLegalParkComment(s.LastBody)
+	parked := isLegalParkComment(s.AgentBody)
 	if parked {
-		if addressedToMember(s.LastBody) {
-			// The person who must decide was named in the park itself. Climbing
-			// to the owner would ask the same human again.
+		if addressedToMember(s.AgentBody) {
+			// The person who must decide was named in the park itself; the
+			// unanswered-human-request pass makes sure they are told.
 			return actNone
 		}
-		if !addressedTo(s.LastBody) {
+		if !addressedTo(s.AgentBody) {
 			// A park that named nobody: nobody is coming. Climb immediately.
 			return actClimb
 		}
-		if idle < livenessWaitIdle {
+		if now.Sub(s.AgentAt) < pol.WaitIdle {
 			return actNone
 		}
 		return actClimb
 	}
 
-	if addressedTo(s.LastBody) {
-		if idle < livenessAddressedIdle {
+	if addressedTo(s.AgentBody) {
+		if now.Sub(s.AgentAt) < pol.AddressedIdle {
 			return actNone
 		}
 		return actWakeAssignee
 	}
-	if idle < livenessDeadEndIdle {
+	if now.Sub(s.AgentAt) < pol.DeadEndIdle {
 		return actNone
 	}
 	return actWakeAssignee
@@ -222,12 +217,7 @@ func rungMarker(rung int, issueID string) string {
 // livenessIssuesSQL is the single candidate query: every non-terminal issue with
 // no run in flight and no unfinished children. Classification happens in Go.
 const livenessIssuesSQL = `
-WITH lastc AS (
-    SELECT DISTINCT ON (issue_id) issue_id, content, created_at, author_type
-    FROM comment
-    WHERE deleted_at IS NULL
-    ORDER BY issue_id, created_at DESC
-), active AS (
+WITH active AS (
     SELECT DISTINCT issue_id
     FROM agent_task_queue
     WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
@@ -238,6 +228,22 @@ WITH lastc AS (
     FROM issue
     WHERE parent_issue_id IS NOT NULL
     GROUP BY parent_issue_id
+), last_agent AS (
+    SELECT DISTINCT ON (issue_id) issue_id, content, created_at
+    FROM comment
+    WHERE deleted_at IS NULL AND author_type = 'agent'
+    ORDER BY issue_id, created_at DESC
+), last_marker AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL
+      AND (content LIKE '%<!-- rung:%' OR content LIKE '%<!-- owner-asked:%')
+    GROUP BY issue_id
+), member_after AS (
+    SELECT DISTINCT a.issue_id
+    FROM last_agent a
+    JOIN comment m ON m.issue_id = a.issue_id
+    WHERE m.deleted_at IS NULL AND m.author_type = 'member' AND m.created_at > a.created_at
 ), rung AS (
     SELECT issue_id, MAX((regexp_match(content, '<!-- rung:([0-9]+):'))[1]::int) AS n
     FROM comment
@@ -246,35 +252,32 @@ WITH lastc AS (
 ), gate AS (
     SELECT issue_id, MAX(created_at) AS at
     FROM comment
-    WHERE deleted_at IS NULL AND content LIKE '✅ 验收门%'
-    GROUP BY issue_id
-), agent_last AS (
-    SELECT issue_id, MAX(created_at) AS at
-    FROM comment
-    WHERE deleted_at IS NULL AND author_type = 'agent'
+    WHERE deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]'
     GROUP BY issue_id
 )
 SELECT i.id::text, i.status,
        COALESCE(k.open_kids, 0), COALESCE(k.unstarted_kids, 0),
-       l.content, l.author_type, l.created_at,
+       a.content, a.created_at,
+       COALESCE(mk.at, 'epoch'::timestamptz),
+       (ma.issue_id IS NOT NULL),
        COALESCE(r.n, 0),
-       COALESCE(g.at, 'epoch'::timestamptz), COALESCE(al.at, 'epoch'::timestamptz)
+       COALESCE(g.at, 'epoch'::timestamptz)
 FROM issue i
-JOIN lastc l ON l.issue_id = i.id
-LEFT JOIN active a ON a.issue_id = i.id
+JOIN last_agent a ON a.issue_id = i.id
+LEFT JOIN active ac ON ac.issue_id = i.id
 LEFT JOIN kids k ON k.parent_issue_id = i.id
+LEFT JOIN last_marker mk ON mk.issue_id = i.id
+LEFT JOIN member_after ma ON ma.issue_id = i.id
 LEFT JOIN rung r ON r.issue_id = i.id
 LEFT JOIN gate g ON g.issue_id = i.id
-LEFT JOIN agent_last al ON al.issue_id = i.id
-WHERE a.issue_id IS NULL
+WHERE ac.issue_id IS NULL
   AND i.status IN ('in_progress', 'blocked', 'in_review')
   AND i.assignee_type IS NOT NULL AND i.assignee_id IS NOT NULL
-  AND l.author_type <> 'member'
   -- Parents normally wait on children; that is their job. The one exception is a
   -- parent whose only open child never started: nothing will ever make progress.
   AND (COALESCE(k.open_kids, 0) = 0
        OR (k.open_kids = 1 AND k.unstarted_kids = 1))
-ORDER BY l.created_at
+ORDER BY a.created_at
 LIMIT 200
 `
 
@@ -295,6 +298,7 @@ func applyLadder(action livenessAction, rung int) livenessAction {
 // It runs once at startup (restart recovery) and on a ticker. Each action is
 // best-effort: one bad row never blocks the rest.
 func (h *Handler) SweepLiveness(ctx context.Context) int {
+	pol := h.livenessPolicy()
 	h.reconcileContradictoryStatuses(ctx)
 	// Independent of the stall table: a pending human decision must reach a human
 	// even while agents keep working around it.
@@ -309,7 +313,7 @@ func (h *Handler) SweepLiveness(ctx context.Context) int {
 	for rows.Next() {
 		var s livenessSnapshot
 		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids,
-			&s.LastBody, &s.LastAuthor, &s.LastAt, &s.Rung, &s.GateAt, &s.LastAgentAt); err != nil {
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAfterAgent, &s.Rung, &s.GateAt); err != nil {
 			slog.Warn("liveness: scan failed", "error", err)
 			continue
 		}
@@ -320,10 +324,10 @@ func (h *Handler) SweepLiveness(ctx context.Context) int {
 	now := time.Now()
 	acted := 0
 	for _, s := range snaps {
-		if acted >= livenessBatch {
+		if acted >= pol.Batch {
 			break
 		}
-		switch applyLadder(classifyLiveness(s, now), s.Rung) {
+		switch applyLadder(classifyLiveness(s, now, pol), s.Rung) {
 		case actAccept, actNone:
 			continue
 		case actWakeAssignee:
@@ -401,7 +405,7 @@ func (h *Handler) wakeAssignee(ctx context.Context, s livenessSnapshot) bool {
 		return false
 	}
 	mention := h.issueAssigneeMention(ctx, issue)
-	minutes := int(time.Since(s.LastAt).Minutes())
+	minutes := int(time.Since(s.AgentAt).Minutes())
 	if minutes < 1 {
 		minutes = 1
 	}
@@ -434,13 +438,13 @@ func (h *Handler) closeReview(ctx context.Context, s livenessSnapshot) bool {
 	}
 	mention := h.issueAssigneeMention(ctx, issue)
 	reason := "本 issue 处于 `in_review` 但缺少 `✅ 验收门` 记录"
-	if !s.GateAt.IsZero() && s.GateAt.Before(s.LastAgentAt) {
+	if !s.GateAt.IsZero() && s.GateAt.Before(s.AgentAt) {
 		reason = "`✅ 验收门` 之后又出现了智能体评论，旧门禁变成历史记录，自动收口不会再依据它"
 	}
 	content := fmt.Sprintf(
 		"%s验收门待补：%s（已 %d 分钟无运行任务，服务端机械巡检）。\n"+
 			"二选一：已满足 → 重新发一条 `✅ 验收门：AC n/n；TEST/UAT 已附；diff 未越界` 作为本 issue 的**最后一条**评论；未满足 → 置回 `in_progress` 继续，或写 `⏳ 等待确认 <问题>` / `⛔ 需要人工审批 <红线>`。\n%s",
-		mention, reason, int(time.Since(s.LastAt).Minutes()), rungMarker(1, s.ID))
+		mention, reason, int(time.Since(s.AgentAt).Minutes()), rungMarker(1, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}
@@ -467,7 +471,7 @@ func (h *Handler) wakeParentOnUnstartedChild(ctx context.Context, s livenessSnap
 	content := fmt.Sprintf(
 		"%s子任务未启动：本 issue 只剩 %s 未终结，而它处于 `backlog`/`todo` 且从未运行过，已 %d 分钟没有运行任务（服务端机械巡检）。\n"+
 			"请本轮决定：置 `in_progress` 开工；或置 `cancelled` 并写明原因（可重建）；确实要人等就写 `⏳ 等待确认 <问题>`。\n%s",
-		mention, childLabel, int(time.Since(s.LastAt).Minutes()), rungMarker(1, s.ID))
+		mention, childLabel, int(time.Since(s.AgentAt).Minutes()), rungMarker(1, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}
@@ -487,11 +491,14 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 	}
 	next, stop := climbTarget(s.Rung, issue.ParentIssueID.Valid)
 	if stop {
-		return false
+		// At the top rung the only remaining mechanical act is making sure the
+		// owner was actually told. An old rung-3 marker from a previous build (or
+		// a ladder that stopped before notifying) must not end in silence.
+		next = 3
 	}
 	mention := h.issueAssigneeMention(ctx, issue)
-	question := summariseWait(s.LastBody)
-	minutes := int(time.Since(s.LastAt).Minutes())
+	question := summariseWait(s.AgentBody)
+	minutes := int(time.Since(s.AgentAt).Minutes())
 	if minutes < 1 {
 		minutes = 1
 	}
@@ -550,9 +557,9 @@ SELECT EXISTS (
 		"[@%s](mention://member/%s) 需要你定一次：本 issue [#%d %s](mention://issue/%s) 机械兜底已到最后一档。\n"+
 			"升级来源：%s（已 %d 分钟没有裁决）。现状：`%s`，无运行任务；待裁决：%s\n"+
 			"请二选一：① 给一句裁决（谁做、做什么、做到什么算完成）→ 我继续；② 判定不值得继续 → 把 issue 置 `cancelled` 或改写验收口径。\n"+
-			"默认建议：若只是缺上游产物或授权，按现有写集降级交付并在证据标注缺口，不要继续空转。\n%s",
+			"默认建议：若只是缺上游产物或授权，按现有写集降级交付并在证据标注缺口，不要继续空转。\n<!-- owner-asked:ladder:%s -->\n%s",
 		ownerName, uuidToString(ownerID), issue.Number, issue.Title, uuidToString(issue.ID),
-		escalatedFrom, minutes, issue.Status, question, rungMarker(3, s.ID))
+		escalatedFrom, minutes, issue.Status, question, s.ID, rungMarker(3, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}
@@ -582,7 +589,7 @@ WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_l
 		issue.ID).Scan(&running); err != nil || running > 0 {
 		return db.Issue{}, "", false
 	}
-	return issue, s.LastBody, true
+	return issue, s.AgentBody, true
 }
 
 // postSystemComment writes one system comment and returns its id.
@@ -773,15 +780,11 @@ ORDER BY p.created_at
 LIMIT $2
 `
 
-// livenessHumanRequestGrace is how long a wait marker is left alone before the
-// owner is told: long enough for a reply in the same working session, short
-// enough that nobody sits on a blocked decision for an hour.
-const livenessHumanRequestGrace = 10 * time.Minute
-
 // sweepUnansweredHumanRequests surfaces a pending human decision to its owner.
 func (h *Handler) sweepUnansweredHumanRequests(ctx context.Context) int {
+	pol := h.livenessPolicy()
 	rows, err := h.DB.Query(ctx, unansweredHumanRequestsSQL,
-		int(livenessHumanRequestGrace.Seconds()), livenessBatch)
+		int(pol.HumanRequestGrace.Seconds()), pol.Batch)
 	if err != nil {
 		slog.Warn("liveness: human request query failed", "error", err)
 		return 0

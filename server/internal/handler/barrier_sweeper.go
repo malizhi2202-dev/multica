@@ -47,7 +47,7 @@ const barrierReadyIssuesSQL = `
 WITH gate AS (
     SELECT issue_id, MAX(created_at) AS gate_at
     FROM comment
-    WHERE deleted_at IS NULL AND content LIKE '✅ 验收门%'
+    WHERE deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]'
     GROUP BY issue_id
 ), lastc AS (
     SELECT DISTINCT ON (issue_id) issue_id, content, created_at
@@ -169,7 +169,7 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 		}
 		var gate string
 		_ = h.DB.QueryRow(ctx,
-			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content LIKE '✅ 验收门%' ORDER BY created_at DESC LIMIT 1`,
+			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]' ORDER BY created_at DESC LIMIT 1`,
 			prev.ID).Scan(&gate)
 		if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
 			ID:          dbid.NewV7(),
@@ -266,7 +266,7 @@ FROM issue c
 JOIN issue p ON p.id = c.parent_issue_id
 JOIN LATERAL (
     SELECT 1 FROM comment g
-    WHERE g.issue_id = c.id AND g.deleted_at IS NULL AND g.content LIKE '✅ 验收门%'
+    WHERE g.issue_id = c.id AND g.deleted_at IS NULL AND g.content ~ '(^|[\n])✅ 验收门[:：]'
     LIMIT 1
 ) gate ON true
 WHERE c.status = 'done'
@@ -311,7 +311,7 @@ func (h *Handler) backfillChildResultHandoffs(ctx context.Context) {
 		}
 		var gate string
 		_ = h.DB.QueryRow(ctx,
-			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content LIKE '✅ 验收门%' ORDER BY created_at DESC LIMIT 1`,
+			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]' ORDER BY created_at DESC LIMIT 1`,
 			child.ID).Scan(&gate)
 		h.postChildResultToParent(ctx, child, gate)
 		posted++
