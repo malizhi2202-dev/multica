@@ -296,6 +296,9 @@ func applyLadder(action livenessAction, rung int) livenessAction {
 // best-effort: one bad row never blocks the rest.
 func (h *Handler) SweepLiveness(ctx context.Context) int {
 	h.reconcileContradictoryStatuses(ctx)
+	// Independent of the stall table: a pending human decision must reach a human
+	// even while agents keep working around it.
+	h.sweepUnansweredHumanRequests(ctx)
 
 	rows, err := h.DB.Query(ctx, livenessIssuesSQL)
 	if err != nil {
@@ -707,4 +710,118 @@ func summariseWait(body string) string {
 		return string(runes[:400]) + "…"
 	}
 	return trimmed
+}
+
+// unansweredHumanRequestsSQL finds an agent's sanctioned wait marker that a human
+// never answered and the owner was never told about.
+//
+// This is NOT the same question as "is the issue stalled". The agents can keep
+// working around a pending human ruling — and did, for an hour on an issue whose
+// own thread said "等待确认…待发起人裁决" while every sweep woke an agent instead
+// of telling the one person who could unblock it. A wait marker is a request to a
+// person; if no person replied, the request must reach a person.
+const unansweredHumanRequestsSQL = `
+WITH agent_park AS (
+    SELECT DISTINCT ON (issue_id) issue_id, id, content, created_at
+    FROM comment
+    WHERE deleted_at IS NULL
+      AND author_type = 'agent'
+      AND (content LIKE '⏳%' OR content LIKE '⛔%')
+    ORDER BY issue_id, created_at DESC
+), answered AS (
+    SELECT p.issue_id
+    FROM agent_park p
+    JOIN comment m ON m.issue_id = p.issue_id
+    WHERE m.deleted_at IS NULL AND m.author_type = 'member' AND m.created_at > p.created_at
+    GROUP BY p.issue_id
+), told AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '%<!-- owner-asked:%'
+    GROUP BY issue_id
+)
+SELECT p.issue_id::text, p.id::text, p.content, p.created_at
+FROM agent_park p
+JOIN issue i ON i.id = p.issue_id
+LEFT JOIN answered a ON a.issue_id = p.issue_id
+LEFT JOIN told t ON t.issue_id = p.issue_id
+WHERE a.issue_id IS NULL
+  AND i.status IN ('in_progress', 'blocked', 'in_review')
+  AND p.created_at < now() - make_interval(secs => $1)
+  AND (t.at IS NULL OR t.at < p.created_at)
+  AND p.content NOT LIKE '%mention://agent/%'
+  AND p.content NOT LIKE '%mention://squad/%'
+ORDER BY p.created_at
+LIMIT $2
+`
+
+// livenessHumanRequestGrace is how long a wait marker is left alone before the
+// owner is told: long enough for a reply in the same working session, short
+// enough that nobody sits on a blocked decision for an hour.
+const livenessHumanRequestGrace = 10 * time.Minute
+
+// sweepUnansweredHumanRequests surfaces a pending human decision to its owner.
+func (h *Handler) sweepUnansweredHumanRequests(ctx context.Context) int {
+	rows, err := h.DB.Query(ctx, unansweredHumanRequestsSQL,
+		int(livenessHumanRequestGrace.Seconds()), livenessBatch)
+	if err != nil {
+		slog.Warn("liveness: human request query failed", "error", err)
+		return 0
+	}
+	type request struct {
+		issueID  string
+		parkID   string
+		body     string
+		parkedAt time.Time
+	}
+	var list []request
+	for rows.Next() {
+		var r request
+		if err := rows.Scan(&r.issueID, &r.parkID, &r.body, &r.parkedAt); err != nil {
+			continue
+		}
+		list = append(list, r)
+	}
+	rows.Close()
+
+	told := 0
+	for _, r := range list {
+		id, err := util.ParseUUID(r.issueID)
+		if err != nil {
+			continue
+		}
+		issue, err := h.Queries.GetIssue(ctx, id)
+		if err != nil {
+			continue
+		}
+		ownerID, ownerName, ok := h.workspaceOwner(ctx, issue.WorkspaceID)
+		if !ok {
+			continue
+		}
+		minutes := int(time.Since(r.parkedAt).Minutes())
+		if minutes < 1 {
+			minutes = 1
+		}
+		parentText := ""
+		if issue.ParentIssueID.Valid {
+			if parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID); err == nil {
+				parentText = fmt.Sprintf("（父 issue [#%d %s](mention://issue/%s)）",
+					parent.Number, parent.Title, uuidToString(parent.ID))
+			}
+		}
+		if _, err := h.postSystemComment(ctx, issue, fmt.Sprintf(
+			"[@%s](mention://member/%s) 有一条等待人工确认已经 %d 分钟没人回：本 issue [#%d %s](mention://issue/%s)%s\n"+
+				"待确认：%s\n"+
+				"两条出路：① 给一句结论（做/不做、按哪个口径）→ 我继续推进；② 判定不值得继续 → 置 `cancelled` 或改写验收口径。\n"+
+				"默认建议：若只是为了等一个偏好或授权，选一个默认口径继续，把假设写进验收证据，不要空等。\n"+
+				"<!-- owner-asked:%s -->",
+			ownerName, uuidToString(ownerID), minutes, issue.Number, issue.Title,
+			uuidToString(issue.ID), parentText, summariseWait(r.body), r.parkID)); err != nil {
+			continue
+		}
+		told++
+		slog.Info("liveness: surfaced an unanswered human request to the owner",
+			"issue_id", r.issueID, "park_comment", r.parkID)
+	}
+	return told
 }
