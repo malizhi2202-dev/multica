@@ -521,6 +521,24 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 	if !ok {
 		return false
 	}
+	// One owner notification per issue per stretch: the unanswered-human-request
+	// pass already tells the owner about a pending decision, and two messages for
+	// the same thing is exactly the noise this consolidation removed.
+	var toldRecently bool
+	if err := h.DB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM comment
+    WHERE issue_id = $1 AND deleted_at IS NULL
+      AND content LIKE '%<!-- owner-asked:%'
+      AND created_at > now() - interval '6 hours'
+)`, issue.ID).Scan(&toldRecently); err == nil && toldRecently {
+		if _, err := h.postSystemComment(ctx, issue, fmt.Sprintf(
+			"阶梯到顶：本 issue 已把待人工确认的请求送到工作区所有者（6 小时内不重复打扰），机械兜底到此为止。\n%s",
+			rungMarker(3, s.ID))); err == nil {
+			slog.Info("liveness: owner already told; ladder closed", "issue_id", s.ID)
+		}
+		return false
+	}
 	escalatedFrom := "本任务的执行角色"
 	if issue.ParentIssueID.Valid {
 		if parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID); err == nil {
