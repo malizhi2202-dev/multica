@@ -224,3 +224,27 @@ func TestGateSupersededByAgent(t *testing.T) {
 		t.Error("an agent speaking after the gate supersedes it")
 	}
 }
+
+// The bug that made a squad get woken again and again: the table decided "wake
+// the assignee" forever because nothing folded the rung into the action. This is
+// the fold.
+func TestApplyLadder(t *testing.T) {
+	cases := []struct {
+		action livenessAction
+		rung   int
+		want   livenessAction
+	}{
+		{actWakeAssignee, 0, actWakeAssignee}, // first ask: the assignee
+		{actWakeAssignee, 1, actClimb},        // already asked: climb
+		{actCloseReview, 2, actClimb},         // already asked twice: still climb
+		{actClimb, 0, actClimb},               // a park that named nobody
+		{actWakeParent, 3, actWakeParent},     // parent actions are not re-asked
+		{actNone, 3, actNone},
+		{actAccept, 1, actAccept},
+	}
+	for _, tc := range cases {
+		if got := applyLadder(tc.action, tc.rung); got != tc.want {
+			t.Errorf("applyLadder(%v, rung %d) = %v, want %v", tc.action, tc.rung, got, tc.want)
+		}
+	}
+}

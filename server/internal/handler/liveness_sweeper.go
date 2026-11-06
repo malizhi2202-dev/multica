@@ -278,6 +278,17 @@ ORDER BY l.created_at
 LIMIT 200
 `
 
+// applyLadder folds the ladder into any repair. A repair that would ask the same
+// actor twice is not a repair: once the assignee has been asked (rung 1) and the
+// issue stalled again, the next move is up a level. For a top-level issue that
+// level is the workspace owner — which is where a human decision belongs.
+func applyLadder(action livenessAction, rung int) livenessAction {
+	if rung >= 1 && (action == actWakeAssignee || action == actCloseReview) {
+		return actClimb
+	}
+	return action
+}
+
 // SweepLiveness is the mechanical half of delivery: it does not judge output, it
 // refuses to let an issue sit with nobody working on it and nobody asked.
 //
@@ -309,15 +320,7 @@ func (h *Handler) SweepLiveness(ctx context.Context) int {
 		if acted >= livenessBatch {
 			break
 		}
-		action := classifyLiveness(s, now)
-		// A repair that would ask the same actor twice is not a repair. Once the
-		// assignee has been asked (rung ≥ 1) and the issue stalled again, the
-		// next move is up a level — for a top-level issue that is the workspace
-		// owner, which is exactly where a human decision belongs.
-		if (action == actWakeAssignee || action == actCloseReview) && s.Rung >= 1 {
-			action = actClimb
-		}
-		switch action {
+		switch applyLadder(classifyLiveness(s, now), s.Rung) {
 		case actAccept, actNone:
 			continue
 		case actWakeAssignee:
