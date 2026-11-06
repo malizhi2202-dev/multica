@@ -301,7 +301,9 @@ func (h *Handler) SweepLiveness(ctx context.Context) int {
 	pol := h.livenessPolicy()
 	h.reconcileContradictoryStatuses(ctx)
 	// Independent of the stall table: a pending human decision must reach a human
-	// even while agents keep working around it.
+	// even while agents keep working around it — unless the protocol already
+	// decides it, which is the case for a repeated environment/credential park.
+	h.sweepEnvironmentDefaultRuling(ctx)
 	h.sweepUnansweredHumanRequests(ctx)
 
 	rows, err := h.DB.Query(ctx, livenessIssuesSQL)
@@ -845,4 +847,115 @@ func (h *Handler) sweepUnansweredHumanRequests(ctx context.Context) int {
 			"issue_id", r.issueID, "park_comment", r.parkID)
 	}
 	return told
+}
+
+// environmentParksSQL finds an issue that keeps parking on an environment,
+// credential or authorisation gap while a local substitute is perfectly usable.
+//
+// The rule "环境缺失 ≠ 阻塞" has been in the protocol for a while, yet an issue
+// asked for "a registered MySQL / five remote identities / an authorisation
+// original" round after round, each time escalating to a human. Asking again is
+// not a decision: after the second such park the system records the default
+// ruling itself and hands the issue back, because the substitute path is
+// already defined and does not need a person.
+const environmentParksSQL = `
+WITH agent_comments AS (
+    SELECT issue_id, id, content, created_at
+    FROM comment
+    WHERE deleted_at IS NULL AND author_type = 'agent'
+), newest_agent AS (
+    SELECT DISTINCT ON (issue_id) issue_id, id, content, created_at
+    FROM agent_comments
+    ORDER BY issue_id, created_at DESC
+), env AS (
+    SELECT issue_id, COUNT(*) AS env_parks
+    FROM agent_comments
+    WHERE content ~* '(环境|数据库|mysql|schema|凭据|凭证|身份|授权|签发|登记|维护方|secret|token|权限|not configured|未经授权|连接)'
+      AND content !~* '(生产|线上|prod|删除|发布|部署|外发|sudo)'
+      AND created_at > now() - interval '24 hours'
+    GROUP BY issue_id
+), answered AS (
+    SELECT DISTINCT n.issue_id
+    FROM newest_agent n
+    JOIN comment m ON m.issue_id = n.issue_id
+    WHERE m.deleted_at IS NULL AND m.author_type = 'member' AND m.created_at > n.created_at
+), ruled AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND content LIKE '%<!-- default-ruling:env:%'
+    GROUP BY issue_id
+)
+SELECT n.issue_id::text, n.content, n.created_at, e.env_parks
+FROM newest_agent n
+JOIN env e ON e.issue_id = n.issue_id
+JOIN issue i ON i.id = n.issue_id
+LEFT JOIN answered a ON a.issue_id = n.issue_id
+LEFT JOIN ruled r ON r.issue_id = n.issue_id
+WHERE a.issue_id IS NULL
+  AND i.status IN ('in_progress', 'blocked')
+  AND e.env_parks >= 3
+  AND n.content ~* '(环境|数据库|mysql|schema|凭据|凭证|身份|授权|签发|登记|维护方|secret|token|权限|not configured|未经授权|连接)'
+  AND n.content !~* '(生产|线上|prod|删除|发布|部署|外发|sudo)'
+  AND n.created_at < now() - make_interval(secs => $1)
+  AND (r.at IS NULL OR r.at < n.created_at)
+ORDER BY n.created_at
+LIMIT $2
+`
+
+// sweepEnvironmentDefaultRuling records the protocol's default ruling for a
+// repeated environment/authorisation park and hands the issue back to its agent.
+func (h *Handler) sweepEnvironmentDefaultRuling(ctx context.Context) int {
+	pol := h.livenessPolicy()
+	rows, err := h.DB.Query(ctx, environmentParksSQL,
+		int(pol.HumanRequestGrace.Seconds()), pol.Batch)
+	if err != nil {
+		slog.Warn("liveness: environment ruling query failed", "error", err)
+		return 0
+	}
+	type park struct {
+		issueID string
+		body    string
+		parked  time.Time
+		count   int
+	}
+	var list []park
+	for rows.Next() {
+		var p park
+		if err := rows.Scan(&p.issueID, &p.body, &p.parked, &p.count); err != nil {
+			continue
+		}
+		list = append(list, p)
+	}
+	rows.Close()
+
+	ruled := 0
+	for _, p := range list {
+		id, err := util.ParseUUID(p.issueID)
+		if err != nil {
+			continue
+		}
+		issue, err := h.Queries.GetIssue(ctx, id)
+		if err != nil {
+			continue
+		}
+		mention := h.issueAssigneeMention(ctx, issue)
+		commentID, postErr := h.postSystemComment(ctx, issue, fmt.Sprintf(
+			"%s默认裁决（环境缺失 ≠ 阻塞）：本 issue 已第 %d 次以「登记环境 / 凭据 / 身份授权」为由停车，机械兜底按协议直接裁决，不再问人。\n"+
+				"裁决：**按本地替代环境继续** —— 先用**本机**（`127.0.0.1` / `localhost`，含本机已开的等价端口，如 3307）的实例建库建角色，不要拿远端 IP 当唯一入口；账号/密钥按代码生成合成身份，外部系统用 mock，走通同一条验收路径。证据逐条标注「本地替代环境」，不得写成登记环境通过。\n"+
+				"本轮要求：按上述方式补齐能补的证据并推进；因本地替代而缺的项，写进交付说明与验收证据，不改 AC 口径也不冒充通过。\n"+
+				"仅当涉及生产 / 线上 / 凭据外发等红线时，才允许改写成 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。\n"+
+				"<!-- default-ruling:env:%s -->",
+			mention, p.count, p.issueID))
+		if postErr != nil {
+			continue
+		}
+		if _, err := h.TaskService.RerunIssue(ctx, issue.ID, pgtype.UUID{}, commentID, pgtype.UUID{},
+			func(db.Agent) bool { return true }); err != nil {
+			slog.Warn("liveness: environment ruling rerun failed", "issue_id", p.issueID, "error", err)
+			continue
+		}
+		ruled++
+		slog.Info("liveness: recorded the default environment ruling", "issue_id", p.issueID, "parks", p.count)
+	}
+	return ruled
 }
