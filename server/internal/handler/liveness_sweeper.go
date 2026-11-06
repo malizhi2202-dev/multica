@@ -154,6 +154,16 @@ func classifyLiveness(s livenessSnapshot, now time.Time) livenessAction {
 		return actCloseReview
 	}
 
+	if s.LastAuthor == "system" {
+		// The last word is a mechanical nudge: the actor it woke already had its
+		// turn and did not take the issue. Asking the same actor again is the
+		// loop this table exists to break, so climb.
+		if idle >= livenessAddressedIdle {
+			return actClimb
+		}
+		return actNone
+	}
+
 	parked := isLegalParkComment(s.LastBody)
 	if parked {
 		if addressedToMember(s.LastBody) {
@@ -183,23 +193,24 @@ func classifyLiveness(s livenessSnapshot, now time.Time) livenessAction {
 	return actWakeAssignee
 }
 
-// nextRung is the ladder. It is monotonic: a rung either moves up or stops.
+// Rung numbers record WHO was last asked, so the ladder never asks the same
+// actor twice and never skips a level:
 //
-//	rung 0 (assignee) → rung 1 (parent leader, or the owner when there is no parent)
-//	rung 1 (parent)   → rung 2 (owner)
-//	rung 2 (owner)    → stop
-func nextRung(current int, hasParent bool) (next int, stop bool) {
-	switch {
-	case current <= 0:
-		if hasParent {
-			return 1, false
-		}
-		return 2, false
-	case current == 1:
-		return 2, false
-	default:
+//	1  the issue's own assignee (a person, an agent, or a squad's leader)
+//	2  the parent issue's leader
+//	3  the workspace owner
+//
+// climbTarget is the next rung up. A level that was already asked and did not
+// act is skipped rather than asked again — that is what used to turn "the squad
+// was woken" into an infinite wake loop.
+func climbTarget(current int, hasParent bool) (next int, stop bool) {
+	if current >= 3 {
 		return current, true
 	}
+	if hasParent && current < 2 {
+		return 2, false
+	}
+	return 3, false
 }
 
 // rungMarker records the ladder position in the thread so restarts and later
@@ -298,7 +309,15 @@ func (h *Handler) SweepLiveness(ctx context.Context) int {
 		if acted >= livenessBatch {
 			break
 		}
-		switch classifyLiveness(s, now) {
+		action := classifyLiveness(s, now)
+		// A repair that would ask the same actor twice is not a repair. Once the
+		// assignee has been asked (rung ≥ 1) and the issue stalled again, the
+		// next move is up a level — for a top-level issue that is the workspace
+		// owner, which is exactly where a human decision belongs.
+		if (action == actWakeAssignee || action == actCloseReview) && s.Rung >= 1 {
+			action = actClimb
+		}
+		switch action {
 		case actAccept, actNone:
 			continue
 		case actWakeAssignee:
@@ -388,7 +407,7 @@ func (h *Handler) wakeAssignee(ctx context.Context, s livenessSnapshot) bool {
 			"- **超出本任务范围**（扩充写集、改跨任务顺序、动他人产物、动红线）→ `[@名字](mention://agent/<id>)` 派给父级负责人，并写明要他裁决什么。\n"+
 			"- **要人等** → `⏳ 等待确认 <问题 + 默认建议 + 影响>`；要审批 → `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。\n"+
 			"只写结论、不派发、不写标记 = 本轮没人接手。\n%s",
-		mention, minutes, issue.Status, rungMarker(0, s.ID))
+		mention, minutes, issue.Status, rungMarker(1, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}
@@ -415,7 +434,7 @@ func (h *Handler) closeReview(ctx context.Context, s livenessSnapshot) bool {
 	content := fmt.Sprintf(
 		"%s验收门待补：%s（已 %d 分钟无运行任务，服务端机械巡检）。\n"+
 			"二选一：已满足 → 重新发一条 `✅ 验收门：AC n/n；TEST/UAT 已附；diff 未越界` 作为本 issue 的**最后一条**评论；未满足 → 置回 `in_progress` 继续，或写 `⏳ 等待确认 <问题>` / `⛔ 需要人工审批 <红线>`。\n%s",
-		mention, reason, int(time.Since(s.LastAt).Minutes()), rungMarker(0, s.ID))
+		mention, reason, int(time.Since(s.LastAt).Minutes()), rungMarker(1, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}
@@ -442,7 +461,7 @@ func (h *Handler) wakeParentOnUnstartedChild(ctx context.Context, s livenessSnap
 	content := fmt.Sprintf(
 		"%s子任务未启动：本 issue 只剩 %s 未终结，而它处于 `backlog`/`todo` 且从未运行过，已 %d 分钟没有运行任务（服务端机械巡检）。\n"+
 			"请本轮决定：置 `in_progress` 开工；或置 `cancelled` 并写明原因（可重建）；确实要人等就写 `⏳ 等待确认 <问题>`。\n%s",
-		mention, childLabel, int(time.Since(s.LastAt).Minutes()), rungMarker(0, s.ID))
+		mention, childLabel, int(time.Since(s.LastAt).Minutes()), rungMarker(1, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}
@@ -460,7 +479,7 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 	if !ok {
 		return false
 	}
-	next, stop := nextRung(s.Rung, issue.ParentIssueID.Valid)
+	next, stop := climbTarget(s.Rung, issue.ParentIssueID.Valid)
 	if stop {
 		return false
 	}
@@ -484,7 +503,7 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 			"%s升级到父级：本子任务已停 %d 分钟，最后一条是执行角色的结论，决定权在父级负责人。\n"+
 				"待裁决：%s\n"+
 				"父级负责人请**在本 issue** 给出结论（扩写集 / 调整顺序 / 降级 / 关闭并记录原因），或写明 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。只在父 issue 讨论、不回到本 issue，子任务会一直停在这里。\n%s",
-			mention, minutes, question, rungMarker(1, s.ID))
+			mention, minutes, question, rungMarker(2, s.ID))
 		commentID, err := h.postSystemComment(ctx, issue, content)
 		if err != nil {
 			return false
@@ -505,11 +524,11 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 	}
 	content := fmt.Sprintf(
 		"[@%s](mention://member/%s) 需要你定一次：本 issue [#%d %s](mention://issue/%s) 机械兜底已到最后一档。\n"+
-			"升级来源：%s（已 30 分钟没有裁决）。现状：`%s`，无运行任务；待裁决：%s\n"+
+			"升级来源：%s（已 %d 分钟没有裁决）。现状：`%s`，无运行任务；待裁决：%s\n"+
 			"请二选一：① 给一句裁决（谁做、做什么、做到什么算完成）→ 我继续；② 判定不值得继续 → 把 issue 置 `cancelled` 或改写验收口径。\n"+
 			"默认建议：若只是缺上游产物或授权，按现有写集降级交付并在证据标注缺口，不要继续空转。\n%s",
 		ownerName, uuidToString(ownerID), issue.Number, issue.Title, uuidToString(issue.ID),
-		escalatedFrom, issue.Status, question, rungMarker(2, s.ID))
+		escalatedFrom, minutes, issue.Status, question, rungMarker(3, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
 	}

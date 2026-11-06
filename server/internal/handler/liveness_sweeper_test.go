@@ -43,24 +43,26 @@ func TestAddressedTo(t *testing.T) {
 	}
 }
 
-// nextRung is the ladder: monotonic, and it stops rather than oscillating.
-func TestNextRung(t *testing.T) {
+// The ladder records who was last asked and climbs without repeating a level.
+func TestClimbTarget(t *testing.T) {
 	cases := []struct {
 		current   int
 		hasParent bool
 		wantNext  int
 		wantStop  bool
 	}{
-		{0, true, 1, false},  // assignee → parent leader
-		{0, false, 2, false}, // no parent: assignee → owner
-		{1, true, 2, false},  // parent leader → owner
-		{2, true, 2, true},   // owner is the last rung
-		{5, true, 5, true},   // unknown rung never moves down
+		{0, true, 2, false},  // park that named nobody, with a parent → parent
+		{0, false, 3, false}, // no parent → owner
+		{1, true, 2, false},  // assignee asked → parent
+		{1, false, 3, false}, // assignee asked, no parent → owner
+		{2, true, 3, false},  // parent asked → owner
+		{3, true, 3, true},   // owner is the last rung
+		{9, true, 9, true},   // never moves down
 	}
 	for _, tc := range cases {
-		next, stop := nextRung(tc.current, tc.hasParent)
+		next, stop := climbTarget(tc.current, tc.hasParent)
 		if next != tc.wantNext || stop != tc.wantStop {
-			t.Errorf("nextRung(%d, %v) = (%d, %v), want (%d, %v)",
+			t.Errorf("climbTarget(%d, %v) = (%d, %v), want (%d, %v)",
 				tc.current, tc.hasParent, next, stop, tc.wantNext, tc.wantStop)
 		}
 	}
@@ -132,6 +134,18 @@ func TestClassifyLiveness(t *testing.T) {
 			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(time.Hour), LastAuthor: "agent",
 				LastBody: "⏳ 等待确认：请 [@负责人](mention://agent/x) 裁决写集"},
 			want: actClimb,
+		},
+		{
+			name: "our own nudge as the last word climbs",
+			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(20 * time.Minute), LastAuthor: "system",
+				LastBody: "[@研发交付小队](mention://squad/x) 停滞自检：本 issue 已 15 分钟没有运行任务"},
+			want: actClimb,
+		},
+		{
+			name: "nudge too fresh to climb",
+			snap: livenessSnapshot{Status: "in_progress", LastAt: ago(2 * time.Minute), LastAuthor: "system",
+				LastBody: "[@研发交付小队](mention://squad/x) 停滞自检"},
+			want: actNone,
 		},
 		{
 			name: "dead end climbs to the assignee within minutes",
