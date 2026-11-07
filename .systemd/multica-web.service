@@ -1,0 +1,27 @@
+[Unit]
+Description=Multica web frontend (Next.js production, :3000)
+Documentation=https://github.com/malizhi2202-dev/multica
+After=network-online.target multica-backend.service
+Wants=network-online.target multica-backend.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/malizhi/ai/multica/apps/web
+EnvironmentFile=/home/malizhi/ai/multica/.env
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+Environment=PATH=/home/malizhi/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 生产模式：next start 跑预编译产物，不做热加载。
+# Resolve next from apps/web/node_modules — the repo root has a stale 15.x copy.
+ExecStart=/home/malizhi/.nvm/versions/node/v22.23.1/bin/node /home/malizhi/ai/multica/apps/web/node_modules/next/dist/bin/next start --port 3000
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=multica-web
+
+[Install]
+WantedBy=default.target

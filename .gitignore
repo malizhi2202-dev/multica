@@ -80,3 +80,9 @@ data/
 __pycache__/
 *.pyc
 perf-report/
+
+# Local deployment artifacts (source-install; not part of the upstream tree)
+.bin/
+.logs/
+.scratch/
+.backup/

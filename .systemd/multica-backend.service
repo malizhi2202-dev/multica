@@ -1,0 +1,28 @@
+[Unit]
+Description=Multica backend API (Go, :10800)
+Documentation=https://github.com/malizhi2202-dev/multica
+# User units cannot hard-require system units, but ordering is still honoured:
+# the backend waits for PostgreSQL to accept connections before starting.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/malizhi/ai/multica/server
+EnvironmentFile=/home/malizhi/ai/multica/.env
+Environment=PATH=/home/malizhi/go/bin:/home/malizhi/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PostgreSQL 5433 may need a moment after boot; retry instead of failing once.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 5433 -q && exit 0; sleep 1; done; exit 1'
+ExecStart=/home/malizhi/ai/multica/.bin/multica-server
+# Restart on any exit; RestartSec keeps a crash loop from spinning.
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=multica-backend
+
+[Install]
+WantedBy=default.target

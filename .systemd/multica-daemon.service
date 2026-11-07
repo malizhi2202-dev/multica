@@ -1,0 +1,39 @@
+[Unit]
+Description=Multica agent runtime daemon (local agent CLI executor)
+Documentation=https://github.com/malizhi2202-dev/multica
+After=network-online.target multica-backend.service
+Wants=network-online.target multica-backend.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/malizhi/ai/multica
+EnvironmentFile=/home/malizhi/ai/multica/.env
+Environment=PATH=/home/malizhi/.local/bin:/home/malizhi/go/bin:/home/malizhi/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# DeepSeek Harness runtime (dsh): the daemon launches `dsh --profile multica
+# --stdio`, so it needs a CLI, a DSH home holding that profile, and the bundle
+# it reinstalls when the profile goes missing.
+# The home is separate from ~/.dsh on purpose: this runtime is pinned to the
+# published dsh 0.2.1-rc.2 while the interactive dev checkout is on another
+# line, and $DSH_HOME/profiles/node_modules is healed per install — two
+# installations sharing one home overwrite each other's module fallback.
+Environment=DSH_HOME=/home/malizhi/.dsh-multica
+Environment=MULTICA_DSH_PATH=/home/malizhi/opt/dsh-multica/node_modules/.bin/dsh
+Environment=MULTICA_DSH_PROFILE_BUNDLE=/home/malizhi/opt/dsh-multica/multica-ai-dsh-runtime-0.2.0-private.1.tgz
+# Codex CLI runtime (codex app-server over stdio). The binary ships inside the
+# ChatGPT/Codex VS Code extension, so it is reached through the stable
+# ~/.local/bin/codex symlink; the probe prefers MULTICA_CODEX_PATH over a bare
+# PATH lookup. Re-point the symlink after an extension upgrade.
+Environment=MULTICA_CODEX_PATH=/home/malizhi/.local/bin/codex
+# --no-auto-update: 自托管环境不走 GitHub release 自更新（无 VPN 会卡住）。
+ExecStart=/home/malizhi/ai/multica/.bin/multica daemon start --foreground --no-auto-update
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=multica-daemon
+
+[Install]
+WantedBy=default.target
