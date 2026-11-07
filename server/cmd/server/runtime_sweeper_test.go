@@ -9,6 +9,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -722,7 +723,7 @@ func TestOfflineRuntimeTasksRespectReconnectGrace(t *testing.T) {
 	}
 }
 
-func TestRuntimeReconnectRetryHasBoundedTerminalPath(t *testing.T) {
+func TestRuntimeReconnectRetrySurvivesLongOfflinePeriod(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no database connection")
 	}
@@ -734,7 +735,8 @@ func TestRuntimeReconnectRetryHasBoundedTerminalPath(t *testing.T) {
 
 	if _, err := testPool.Exec(ctx, `
 		UPDATE agent_task_queue
-		SET status = 'failed', completed_at = now(), failure_reason = 'runtime_offline'
+		SET status = 'failed', completed_at = now(), failure_reason = 'runtime_offline',
+		    session_id = 'saved-session', work_dir = '/tmp/saved-workdir'
 		WHERE id = $1
 	`, parentID); err != nil {
 		t.Fatalf("fail runtime_offline parent: %v", err)
@@ -746,11 +748,12 @@ func TestRuntimeReconnectRetryHasBoundedTerminalPath(t *testing.T) {
 	var retryID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (
-			agent_id, runtime_id, issue_id, status, priority, fire_at,
+			agent_id, runtime_id, issue_id, status, priority, fire_at, session_id, work_dir,
 			parent_task_id, retry_of_task_id, attempt, max_attempts
 		)
 		SELECT agent_id, runtime_id, issue_id, 'deferred', priority,
-		       now() - interval '10 minutes', id, id, attempt + 1, max_attempts
+		       now() - interval '10 minutes', session_id, work_dir,
+		       id, id, attempt + 1, max_attempts
 		FROM agent_task_queue WHERE id = $1
 		RETURNING id
 	`, parentID).Scan(&retryID); err != nil {
@@ -797,37 +800,49 @@ func TestRuntimeReconnectRetryHasBoundedTerminalPath(t *testing.T) {
 	setAgentRuntimeOffline(t, agentID, defaultRuntimeReconnectGrace+time.Hour)
 	failed, err = queries.FailExpiredRuntimeReconnectRetries(ctx, params)
 	if err != nil {
-		t.Fatalf("expire retry beyond grace: %v", err)
+		t.Fatalf("check retry beyond grace: %v", err)
 	}
-	if len(failed) != 1 || failed[0].ID.Bytes != parseUUIDBytes(retryID) {
-		t.Fatalf("expired retries = %d, want retry %s", len(failed), retryID)
+	if len(failed) != 0 {
+		t.Fatalf("long offline period expired %d retries", len(failed))
 	}
-	if !failed[0].FailureReason.Valid || failed[0].FailureReason.String != "runtime_reconnect_timeout" {
-		t.Fatalf("failure reason = %q, want runtime_reconnect_timeout", failed[0].FailureReason.String)
+	var retryStatus string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, retryID).Scan(&retryStatus); err != nil {
+		t.Fatalf("read waiting retry: %v", err)
 	}
-
-	taskSvc := service.NewTaskService(queries, testPool, nil, events.New())
-	taskSvc.HandleFailedTasks(ctx, failed)
-
-	var issueStatus string
-	if err := testPool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
-		t.Fatalf("read issue status: %v", err)
+	if retryStatus != "deferred" {
+		t.Fatalf("retry status = %q, want deferred until reconnect", retryStatus)
 	}
-	if issueStatus != "todo" {
-		t.Fatalf("issue status = %q, want todo after terminal reconnect timeout", issueStatus)
+	if _, err := testPool.Exec(ctx, `
+		UPDATE agent_runtime SET status = 'online', last_seen_at = now()
+		WHERE id = (SELECT runtime_id FROM agent WHERE id = $1)
+	`, agentID); err != nil {
+		t.Fatalf("reconnect runtime: %v", err)
 	}
-
-	var undrained, retryChildren int
-	if err := testPool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE completed_at IS NULL),
-		       count(*) FILTER (WHERE parent_task_id = $1)
-		FROM agent_task_queue WHERE issue_id = $2
-	`, retryID, issueID).Scan(&undrained, &retryChildren); err != nil {
-		t.Fatalf("read terminal retry state: %v", err)
+	var runtimeID string
+	if err := testPool.QueryRow(ctx, `SELECT runtime_id::text FROM agent WHERE id = $1`, agentID).Scan(&runtimeID); err != nil {
+		t.Fatalf("read runtime: %v", err)
 	}
-	if undrained != 0 || retryChildren != 0 {
-		t.Fatalf("terminal retry leaked work: undrained=%d child_retries=%d", undrained, retryChildren)
+	tx, err := testPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin isolated promotion: %v", err)
 	}
+	defer tx.Rollback(ctx)
+	promoted, err := db.New(tx).PromoteDueDeferredTasksForRuntime(ctx, db.PromoteDueDeferredTasksForRuntimeParams{
+		RuntimeID: util.MustParseUUID(runtimeID), RuntimeStaleSecs: staleThresholdSeconds,
+	})
+	if err != nil {
+		t.Fatalf("promote after reconnect: %v", err)
+	}
+	for _, task := range promoted {
+		if task.ID.Bytes == parseUUIDBytes(retryID) {
+			if !task.SessionID.Valid || task.SessionID.String != "saved-session" ||
+				!task.WorkDir.Valid || task.WorkDir.String != "/tmp/saved-workdir" {
+				t.Fatalf("resume pointers lost: session=%v work_dir=%v", task.SessionID, task.WorkDir)
+			}
+			return
+		}
+	}
+	t.Fatalf("reconnected runtime did not promote saved retry %s", retryID)
 }
 
 // TestSweepResetsInProgressIssueToTodo verifies the core fix: when the sweeper
@@ -1002,16 +1017,8 @@ func TestSweepDoesNotResetIssueAlreadyInReview(t *testing.T) {
 	}
 }
 
-// TestExpireStaleQueuedTasks pins the queued sweep to runtime liveness rather
-// than queue age (MUL-6558). The same ancient queued task must survive while
-// its runtime is heartbeating — a busy runtime is not a dead one — and only
-// become expirable once that runtime has been silent past the reconnect grace.
-// A third phase covers the other direction: liveness alone is not enough
-// either, because enqueue binds a task to its agent's runtime without checking
-// that the runtime is up. A task assigned to an already-dead runtime must still
-// get its own full grace to wait, or assigning an issue to a laptop that is
-// closed overnight fails inside one sweep tick.
-// A runtime_offline retry stays exempt throughout; FailExpiredRuntimeReconnectRetries owns its exit.
+// A queued task bound to an existing runtime remains runnable after any offline
+// duration. Reopening the daemon claims the same task without a fresh enqueue.
 func TestExpireStaleQueuedTasks(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no database connection")
@@ -1031,7 +1038,7 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 		t.Fatalf("failed to find test agent: %v", err)
 	}
 
-	// One ancient queued task (should expire) and one fresh queued task (should not).
+	// One ancient queued task and one fresh queued task.
 	// Constraint: idx_one_pending_task_per_issue_agent → use distinct issues.
 	mkIssue := func(label string) string {
 		var issueID string
@@ -1120,8 +1127,7 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 		t.Fatal("live runtime: the fresh queued task was expired")
 	}
 
-	// Phase 2 — the runtime goes silent past the grace. Now the queued work it
-	// owned is unreachable and must be retired, except the runtime_offline retry.
+	// Phase 2 — even after a long offline period the bound tasks remain queued.
 	ageOutAgentRuntime(t, agentID, 5*time.Hour)
 	failed, err := queries.ExpireStaleQueuedTasks(ctx, db.ExpireStaleQueuedTasksParams{
 		ReconnectGraceSecs: graceSecs,
@@ -1131,21 +1137,19 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 		t.Fatalf("ExpireStaleQueuedTasks (dead runtime) failed: %v", err)
 	}
 	expired := expiredIDs(failed)
-	if !expired[parseUUIDBytes(oldTaskID)] {
-		t.Fatal("dead runtime: the 5h-old queued task should expire once its runtime is gone")
+	if expired[parseUUIDBytes(oldTaskID)] {
+		t.Fatal("offline runtime: the 5h-old queued task must await reconnect")
 	}
-	// The fresh row is the same case as phase 3 seen from the other side: its
-	// runtime is dead, but it has not waited a grace of its own yet, so both
-	// conditions are required and it survives this sweep.
+	// Fresh work is retained for the same reason as aged work: the runtime
+	// record still exists and may reconnect.
 	if expired[parseUUIDBytes(freshTaskID)] {
-		t.Fatal("dead runtime: a task queued moments ago must still get its own full grace before failing")
+		t.Fatal("offline runtime: a fresh queued task must await reconnect")
 	}
 	if expired[parseUUIDBytes(recoveryTaskID)] {
 		t.Fatal("runtime_offline retry must stay exempt from the queued sweep")
 	}
 
-	// DB assertions: the aged row failed as queued_expired; the fresh row is
-	// still queued because only one of the two conditions holds for it.
+	// DB assertions: no bound task is discarded because the daemon was offline.
 	var oldStatus, oldReason, oldErr string
 	if err := testPool.QueryRow(ctx, `
 		SELECT status, COALESCE(failure_reason, ''), COALESCE(error, '')
@@ -1153,14 +1157,14 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 	`, oldTaskID).Scan(&oldStatus, &oldReason, &oldErr); err != nil {
 		t.Fatalf("failed to read old task: %v", err)
 	}
-	if oldStatus != "failed" {
-		t.Fatalf("old task: expected status=failed, got %q", oldStatus)
+	if oldStatus != "queued" {
+		t.Fatalf("old task: expected status=queued, got %q", oldStatus)
 	}
-	if oldReason != "queued_expired" {
-		t.Fatalf("old task: expected failure_reason=queued_expired, got %q", oldReason)
+	if oldReason != "" {
+		t.Fatalf("old task: unexpected failure_reason=%q", oldReason)
 	}
-	if !strings.Contains(oldErr, "runtime unavailable") {
-		t.Fatalf("old task: expected error to name the runtime as the cause, got %q", oldErr)
+	if oldErr != "" {
+		t.Fatalf("old task: unexpected error=%q", oldErr)
 	}
 
 	var freshStatus string
@@ -1170,7 +1174,7 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 		t.Fatalf("failed to read fresh task: %v", err)
 	}
 	if freshStatus != "queued" {
-		t.Fatalf("fresh task: expected status=queued (it has not waited a full grace yet), got %q", freshStatus)
+		t.Fatalf("fresh task: expected status=queued until reconnect, got %q", freshStatus)
 	}
 
 	var recoveryStatus string
@@ -1181,11 +1185,8 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 		t.Fatalf("runtime recovery retry: expected status=queued, got %q", recoveryStatus)
 	}
 
-	// Phase 3 — a task enqueued AFTER the runtime went dark. The runtime has
-	// been silent for hours, so the liveness clause is already satisfied the
-	// moment this row is created; only the row's own age keeps it alive. It
-	// must survive until it has waited a full grace of its own, otherwise
-	// assigning an issue to a machine that is merely asleep fails in ~30s.
+	// Phase 3 — a task enqueued after the runtime went dark also waits through
+	// a long offline interval and becomes claimable when the runtime returns.
 	lateIssueID := mkIssue("Queued TTL test (enqueued after runtime died)")
 	t.Cleanup(func() {
 		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, lateIssueID)
@@ -1208,10 +1209,10 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 		t.Fatalf("ExpireStaleQueuedTasks (late enqueue) failed: %v", err)
 	}
 	if expiredIDs(lateSweep)[parseUUIDBytes(lateTaskID)] {
-		t.Fatal("a task enqueued against an already-offline runtime was failed immediately; it must get a full reconnect grace of its own to wait")
+		t.Fatal("a task enqueued against an offline runtime must await reconnect")
 	}
 
-	// Once it HAS waited a full grace, it expires like any other.
+	// Aging a late assignment also cannot discard it before reconnect.
 	if _, err := testPool.Exec(ctx, `
 		UPDATE agent_task_queue SET created_at = now() - make_interval(secs => $1) WHERE id = $2
 	`, graceSecs+60, lateTaskID); err != nil {
@@ -1224,14 +1225,14 @@ func TestExpireStaleQueuedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExpireStaleQueuedTasks (aged late enqueue) failed: %v", err)
 	}
-	if !expiredIDs(agedSweep)[parseUUIDBytes(lateTaskID)] {
-		t.Fatal("a task that waited a full grace against a dead runtime should expire")
+	if expiredIDs(agedSweep)[parseUUIDBytes(lateTaskID)] {
+		t.Fatal("a task queued against an offline runtime must await reconnect")
 	}
 }
 
-// TestExpireStaleQueuedTasksRespectsBatchLimit verifies the per-tick cap so
-// that a large backlog behind a departed runtime cannot monopolise a sweep.
-func TestExpireStaleQueuedTasksRespectsBatchLimit(t *testing.T) {
+// A large backlog stays queued while the runtime is offline; cleanup does not
+// consume the batch cap by failing valid work.
+func TestExpireStaleQueuedTasksKeepsLongOfflineBacklog(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no database connection")
 	}
@@ -1281,8 +1282,7 @@ func TestExpireStaleQueuedTasksRespectsBatchLimit(t *testing.T) {
 		}
 	}
 
-	// Nothing is expirable while the runtime heartbeats, so the batch cap can
-	// only be observed once that runtime has been silent past the grace.
+	// Even after a long offline interval, none of these bound tasks may expire.
 	ageOutAgentRuntime(t, agentID, 5*time.Hour)
 
 	queries := db.New(testPool)
@@ -1293,8 +1293,8 @@ func TestExpireStaleQueuedTasksRespectsBatchLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExpireStaleQueuedTasks failed: %v", err)
 	}
-	if len(failed) != 2 {
-		t.Fatalf("expected batch cap of 2, got %d", len(failed))
+	if len(failed) != 0 {
+		t.Fatalf("offline backlog expired %d tasks", len(failed))
 	}
 
 	var remaining int
@@ -1304,8 +1304,8 @@ func TestExpireStaleQueuedTasksRespectsBatchLimit(t *testing.T) {
 	`, issueIDs).Scan(&remaining); err != nil {
 		t.Fatalf("failed to count remaining queued: %v", err)
 	}
-	if remaining != 3 {
-		t.Fatalf("expected 3 queued tasks remaining after batched sweep, got %d", remaining)
+	if remaining != 5 {
+		t.Fatalf("expected all 5 queued tasks to await reconnect, got %d", remaining)
 	}
 }
 

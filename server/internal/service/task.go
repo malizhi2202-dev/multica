@@ -5916,8 +5916,8 @@ func (s *TaskService) FailTasksForOfflineRuntimes(ctx context.Context, arg db.Fa
 	})
 }
 
-// FailExpiredRuntimeReconnectRetries fails deferred retries that reached their
-// terminal reconnect deadline.
+// FailExpiredRuntimeReconnectRetries cleans up old retries detached from a
+// deleted runtime; a registered runtime can reconnect after any duration.
 func (s *TaskService) FailExpiredRuntimeReconnectRetries(ctx context.Context, arg db.FailExpiredRuntimeReconnectRetriesParams) ([]db.AgentTaskQueue, error) {
 	return s.terminateTasksInTx(ctx, func(qtx *db.Queries) ([]db.AgentTaskQueue, error) {
 		return qtx.FailExpiredRuntimeReconnectRetries(ctx, arg)
@@ -5931,7 +5931,7 @@ func (s *TaskService) FailStaleTasks(ctx context.Context, arg db.FailStaleTasksP
 	})
 }
 
-// ExpireStaleQueuedTasks fails queued work whose runtime never came back.
+// ExpireStaleQueuedTasks cleans up queued work detached from a deleted runtime.
 func (s *TaskService) ExpireStaleQueuedTasks(ctx context.Context, arg db.ExpireStaleQueuedTasksParams) ([]db.AgentTaskQueue, error) {
 	return s.terminateTasksInTx(ctx, func(qtx *db.Queries) ([]db.AgentTaskQueue, error) {
 		return qtx.ExpireStaleQueuedTasks(ctx, arg)

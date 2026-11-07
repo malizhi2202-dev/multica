@@ -326,9 +326,9 @@ func sweepOfflineRuntimeTasks(ctx context.Context, queries *db.Queries, taskSvc 
 	return
 }
 
-// sweepExpiredRuntimeReconnectRetries gives health-gated retry waiting a
-// bounded terminal path. Without this stage a daemon that never returns leaves
-// the issue active and prevents its runtime from ever becoming GC-eligible.
+// sweepExpiredRuntimeReconnectRetries cleans up retries detached from a
+// deleted runtime. A registered runtime can reconnect after any duration, so
+// its health-gated retry stays deferred until then or an explicit cancellation.
 func sweepExpiredRuntimeReconnectRetries(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService, reconnectGrace time.Duration) (stats runtimeSweepStageStats) {
 	startedAt := time.Now()
 	defer func() {
@@ -620,13 +620,9 @@ func sweepStaleTasks(ctx context.Context, queries *db.Queries, taskSvc *service.
 	return
 }
 
-// sweepExpiredQueuedTasks fails queued tasks whose runtime has stopped proving
-// it is alive. Companion to the dispatch-time admission gate added in MUL-1899:
-// that gate prevents new doomed enqueues; this one retires work already queued
-// against a runtime that then went away. It deliberately does NOT expire on
-// queue age — a heartbeating runtime is busy, not dead, and MUL-6558 showed a
-// wall clock killing healthy work behind a slow queue. Capped to
-// queuedExpireBatchSize per tick so a big backlog can't monopolise the DB.
+// sweepExpiredQueuedTasks cleans up queued rows detached from a deleted
+// runtime. Work bound to a registered runtime survives long offline periods
+// and is claimed when that runtime reconnects.
 func sweepExpiredQueuedTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService, reconnectGrace time.Duration) (stats runtimeSweepStageStats) {
 	startedAt := time.Now()
 	defer func() {
