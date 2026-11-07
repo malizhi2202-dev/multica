@@ -682,7 +682,8 @@ func TestCommentSourceContextLifecycle(t *testing.T) {
 	}
 	if _, err := cleanupTx.Exec(ctx, `
 		UPDATE issue_source_context_object_intent
-		SET created_at = now() - interval '2 hours', next_attempt_at = '-infinity'::timestamptz
+		SET created_at = now() - interval '2 hours', next_attempt_at = '-infinity'::timestamptz,
+		    state = 'pending', lease_token = NULL, lease_expires_at = NULL
 		WHERE source_context_id = $1
 	`, contextID); err != nil {
 		t.Fatalf("age target delete intents: %v", err)
