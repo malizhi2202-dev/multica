@@ -2,16 +2,20 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // barrierSweepIdle is how long a gated issue must stay quiet before the
@@ -40,15 +44,23 @@ const barrierSweepIdle = 10 * time.Minute
 //
 // Guards are structural: the gate comment must exist, the issue must be
 // in_progress/in_review, no task may be queued/dispatched/running/waiting, the
-// last comment must not be a wait (`⏳`) or approval (`⛔`) marker, no agent may
-// have spoken AFTER the newest gate comment (a gate an agent followed is
-// history, not a verdict), and a parent must have no unfinished child.
+// last comment must not be a wait (`⏳`) or approval (`⛔`) marker, no agent or
+// member may have spoken AFTER the newest agent-authored gate comment, and a
+// parent must have no unfinished child.
 const barrierReadyIssuesSQL = `
-WITH gate AS (
+WITH gate_raw AS (
     SELECT issue_id, MAX(created_at) AS gate_at
     FROM comment
-    WHERE deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]'
+    WHERE deleted_at IS NULL AND author_type = 'agent'
+      AND content ~ '(^|[\n])✅ 验收门[:：]'
     GROUP BY issue_id
+), gate AS (
+    SELECT g.issue_id, g.gate_at
+    FROM gate_raw g
+    WHERE NOT EXISTS (SELECT 1 FROM comment h
+        WHERE h.issue_id = g.issue_id AND h.deleted_at IS NULL
+          AND h.author_type = 'system' AND h.created_at > g.gate_at
+          AND (h.type = 'system' OR h.content LIKE '%<!-- handoff:%'))
 ), lastc AS (
     SELECT DISTINCT ON (issue_id) issue_id, content, created_at
     FROM comment
@@ -57,17 +69,22 @@ WITH gate AS (
 ), active AS (
     SELECT DISTINCT issue_id
     FROM agent_task_queue
-    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 ), kids AS (
-    SELECT parent_issue_id,
-           COUNT(*) FILTER (WHERE status NOT IN ('done', 'cancelled')) AS unfinished
-    FROM issue
-    WHERE parent_issue_id IS NOT NULL
-    GROUP BY parent_issue_id
+    SELECT c.parent_issue_id,
+           COUNT(*) FILTER (WHERE COALESCE(cs.category, CASE
+               WHEN c.status = 'done' THEN 'done'
+               WHEN c.status = 'cancelled' THEN 'closed'
+               ELSE 'started' END) NOT IN ('done', 'closed')) AS unfinished
+    FROM issue c
+    LEFT JOIN issue_status cs ON cs.workspace_id = c.workspace_id AND cs.key = c.status
+    WHERE c.parent_issue_id IS NOT NULL
+    GROUP BY c.parent_issue_id
 )
 SELECT i.id::text, i.status, l.content, g.gate_at,
-       COALESCE(la.last_at, g.gate_at) AS last_agent_at
+       COALESCE(la.last_at, g.gate_at) AS last_actor_at
 FROM issue i
+LEFT JOIN issue_status ist ON ist.workspace_id = i.workspace_id AND ist.key = i.status
 JOIN gate g ON g.issue_id = i.id
 JOIN lastc l ON l.issue_id = i.id
 LEFT JOIN active a ON a.issue_id = i.id
@@ -75,37 +92,31 @@ LEFT JOIN kids k ON k.parent_issue_id = i.id
 LEFT JOIN LATERAL (
     SELECT MAX(created_at) AS last_at
     FROM comment
-    WHERE issue_id = i.id AND deleted_at IS NULL AND author_type = 'agent'
+    WHERE issue_id = i.id AND deleted_at IS NULL AND author_type IN ('agent', 'member')
 ) la ON true
-WHERE i.status IN ('in_progress', 'in_review')
+WHERE COALESCE(ist.category, CASE
+    WHEN i.status IN ('in_progress', 'in_review', 'blocked') THEN 'started'
+    ELSE NULL END) = 'started'
+  AND i.status <> 'blocked'
   AND a.issue_id IS NULL
+  AND ($2::uuid IS NULL OR i.id = $2::uuid)
   AND l.created_at < now() - make_interval(secs => $1)
   AND COALESCE(k.unfinished, 0) = 0
 ORDER BY l.created_at
 LIMIT 100
 `
 
-// gateAutoAdvanceBlocked reports whether an issue's own last word forbids the
-// automated close. While the work is still in_progress any marker-shaped last
-// comment (⏳/⛔) means "not finished": a sanctioned wait, a failed round, or a
-// gate rejection all point at outstanding work, and auto-closing on top of one
-// turns an abandoned child into a delivered one. In in_review the gate comment
-// already recorded acceptance, so a later marker is thread conversation.
-func gateAutoAdvanceBlocked(status, lastComment string) bool {
-	if status != "in_progress" {
-		return false
-	}
+// gateAutoAdvanceBlocked reports whether the latest comment explicitly says
+// work is still waiting or approval is required, regardless of issue status.
+func gateAutoAdvanceBlocked(_ string, lastComment string) bool {
 	trimmed := strings.TrimSpace(lastComment)
 	return strings.HasPrefix(trimmed, "⏳") || strings.HasPrefix(trimmed, "⛔")
 }
 
-// gateSupersededByAgent reports whether an agent spoke after the newest
-// acceptance gate. Such a gate is history, not a verdict: an agent that came
-// back to say "this is not implemented yet" (or to narrow scope) supersedes it.
-// Without this guard the sweep re-closed a reopened child on every tick, since
-// the old gate comment stayed in the thread forever.
-func gateSupersededByAgent(gateAt, lastAgentAt time.Time) bool {
-	return lastAgentAt.After(gateAt)
+// gateSupersededByActor reports whether an agent or member spoke after the
+// acceptance gate. Human rework instructions must not be auto-accepted.
+func gateSupersededByActor(gateAt, lastActorAt time.Time) bool {
+	return lastActorAt.After(gateAt)
 }
 
 // SweepBarrierLiveness advances every gated, idle issue to `done` and lets the
@@ -113,7 +124,11 @@ func gateSupersededByAgent(gateAt, lastAgentAt time.Time) bool {
 // of issues advanced. Called from a server-side ticker; best-effort per row so
 // one bad row cannot stall the rest.
 func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
-	rows, err := h.DB.Query(ctx, barrierReadyIssuesSQL, int(barrierSweepIdle.Seconds()))
+	// A recovered child may have finished while its parent gate was old. Post
+	// the result first so candidate selection sees and invalidates that gate.
+	h.backfillChildResultHandoffs(ctx)
+
+	rows, err := h.DB.Query(ctx, barrierReadyIssuesSQL, int(barrierSweepIdle.Seconds()), nil)
 	if err != nil {
 		slog.Warn("barrier sweeper: candidate query failed", "error", err)
 		return 0
@@ -121,15 +136,15 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 	var ids []string
 	for rows.Next() {
 		var id, status, lastComment string
-		var gateAt, lastAgentAt time.Time
-		if err := rows.Scan(&id, &status, &lastComment, &gateAt, &lastAgentAt); err != nil {
+		var gateAt, lastActorAt time.Time
+		if err := rows.Scan(&id, &status, &lastComment, &gateAt, &lastActorAt); err != nil {
 			slog.Warn("barrier sweeper: scan failed", "error", err)
 			continue
 		}
 		if gateAutoAdvanceBlocked(status, lastComment) {
 			continue
 		}
-		if gateSupersededByAgent(gateAt, lastAgentAt) {
+		if gateSupersededByActor(gateAt, lastActorAt) {
 			continue
 		}
 		ids = append(ids, id)
@@ -139,37 +154,19 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 		slog.Warn("barrier sweeper: rows iteration failed", "error", err)
 	}
 
-	// Backfill: children that reached done before the handoff existed (or while
-	// the sweeper was down) still owe their parent a result summary. Deduped by
-	// the per-child marker embedded in the comment body.
-	h.backfillChildResultHandoffs(ctx)
-
 	moved := 0
 	for _, raw := range ids {
 		id, err := util.ParseUUID(raw)
 		if err != nil {
 			continue
 		}
-		prev, err := h.Queries.GetIssue(ctx, id)
-		if err != nil {
-			slog.Warn("barrier sweeper: load issue failed", "issue_id", raw, "error", err)
-			continue
-		}
-		if prev.Status != "in_progress" && prev.Status != "in_review" {
-			continue
-		}
-		updated, err := h.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
-			ID:          prev.ID,
-			WorkspaceID: prev.WorkspaceID,
-			Status:      "done",
-		})
-		if err != nil {
-			slog.Warn("barrier sweeper: advance failed", "issue_id", raw, "error", err)
+		prev, updated, advanced := h.advanceBarrierCandidate(ctx, id)
+		if !advanced {
 			continue
 		}
 		var gate string
 		_ = h.DB.QueryRow(ctx,
-			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]' ORDER BY created_at DESC LIMIT 1`,
+			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'agent' AND content ~ '(^|[\n])✅ 验收门[:：]' ORDER BY created_at DESC LIMIT 1`,
 			prev.ID).Scan(&gate)
 		if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
 			ID:          dbid.NewV7(),
@@ -195,6 +192,57 @@ func (h *Handler) SweepBarrierLiveness(ctx context.Context) int {
 	return moved
 }
 
+// advanceBarrierCandidate locks the issue and rechecks the complete gate
+// predicate before changing status. A member reply touches that same issue
+// row, so it cannot slip between this check and the status update.
+func (h *Handler) advanceBarrierCandidate(ctx context.Context, id pgtype.UUID) (db.Issue, db.Issue, bool) {
+	if h.TxStarter == nil {
+		return db.Issue{}, db.Issue{}, false
+	}
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		slog.Warn("barrier sweeper: begin failed", "issue_id", uuidToString(id), "error", err)
+		return db.Issue{}, db.Issue{}, false
+	}
+	defer tx.Rollback(ctx)
+	var lockedID pgtype.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM issue WHERE id = $1 FOR UPDATE`, id).Scan(&lockedID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("barrier sweeper: lock failed", "issue_id", uuidToString(id), "error", err)
+		}
+		return db.Issue{}, db.Issue{}, false
+	}
+	var candidateID, status, lastComment string
+	var gateAt, lastActorAt time.Time
+	if err := tx.QueryRow(ctx, barrierReadyIssuesSQL, int(barrierSweepIdle.Seconds()), id).
+		Scan(&candidateID, &status, &lastComment, &gateAt, &lastActorAt); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("barrier sweeper: recheck failed", "issue_id", uuidToString(id), "error", err)
+		}
+		return db.Issue{}, db.Issue{}, false
+	}
+	if gateAutoAdvanceBlocked(status, lastComment) || gateSupersededByActor(gateAt, lastActorAt) {
+		return db.Issue{}, db.Issue{}, false
+	}
+	qtx := h.Queries.WithTx(tx)
+	prev, err := qtx.GetIssue(ctx, id)
+	if err != nil {
+		return db.Issue{}, db.Issue{}, false
+	}
+	updated, err := qtx.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+		ID: prev.ID, WorkspaceID: prev.WorkspaceID, Status: "done",
+	})
+	if err != nil {
+		slog.Warn("barrier sweeper: advance failed", "issue_id", uuidToString(id), "error", err)
+		return db.Issue{}, db.Issue{}, false
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slog.Warn("barrier sweeper: commit failed", "issue_id", uuidToString(id), "error", err)
+		return db.Issue{}, db.Issue{}, false
+	}
+	return prev, updated, true
+}
+
 // postChildResultToParent hands a completed child's acceptance summary back to
 // its parent issue, so the parent can synthesize results incrementally instead
 // of waiting for the whole stage barrier and then re-reading every child.
@@ -212,8 +260,8 @@ func (h *Handler) postChildResultToParent(ctx context.Context, child db.Issue, g
 	if err != nil {
 		return
 	}
-	switch parent.Status {
-	case "done", "cancelled", "backlog":
+	category, err := issuestatus.CategoryWithError(ctx, h.issueStatusCatalog(), parent.WorkspaceID, parent.Status)
+	if err != nil || category == issuestatus.CategoryDone || category == issuestatus.CategoryClosed || parent.Status == "backlog" {
 		return
 	}
 
@@ -245,7 +293,7 @@ func (h *Handler) postChildResultToParent(ctx context.Context, child db.Issue, g
 		"%s子任务结果回传：[#%d %s](mention://issue/%s) 已验收通过并置 done。\n验收摘要：%s\n完整证据见子 issue；请汇总后推进父级。\n<!-- handoff:%s -->",
 		mention, child.Number, child.Title, uuidToString(child.ID), summary, uuidToString(child.ID),
 	)
-	if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+	created, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
 		ID:          dbid.NewV7(),
 		IssueID:     parent.ID,
 		WorkspaceID: parent.WorkspaceID,
@@ -253,9 +301,19 @@ func (h *Handler) postChildResultToParent(ctx context.Context, child db.Issue, g
 		AuthorID:    pgtype.UUID{Bytes: [16]byte{}, Valid: true},
 		Content:     content,
 		Type:        "comment",
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Warn("barrier sweeper: parent handoff failed", "parent_id", uuidToString(parent.ID), "error", err)
+		return
 	}
+	h.publish(protocol.EventCommentCreated, uuidToString(parent.WorkspaceID), "system", "", map[string]any{
+		"comment":             commentToResponse(created.Comment(), nil, nil),
+		"issue_title":         parent.Title,
+		"issue_assignee_type": textToPtr(parent.AssigneeType),
+		"issue_assignee_id":   uuidToPtr(parent.AssigneeID),
+		"issue_status":        parent.Status,
+		"issue_revision":      created.IssueRevision,
+	})
 }
 
 // backfillDoneChildrenHandoffsSQL finds done children whose parent is still
@@ -264,13 +322,18 @@ const backfillDoneChildrenHandoffsSQL = `
 SELECT c.id::text
 FROM issue c
 JOIN issue p ON p.id = c.parent_issue_id
+LEFT JOIN issue_status cs ON cs.workspace_id = c.workspace_id AND cs.key = c.status
+LEFT JOIN issue_status ps ON ps.workspace_id = p.workspace_id AND ps.key = p.status
 JOIN LATERAL (
     SELECT 1 FROM comment g
-    WHERE g.issue_id = c.id AND g.deleted_at IS NULL AND g.content ~ '(^|[\n])✅ 验收门[:：]'
+    WHERE g.issue_id = c.id AND g.deleted_at IS NULL AND g.author_type = 'agent'
+      AND g.content ~ '(^|[\n])✅ 验收门[:：]'
     LIMIT 1
 ) gate ON true
-WHERE c.status = 'done'
-  AND p.status IN ('in_progress', 'in_review')
+WHERE COALESCE(cs.category, CASE WHEN c.status = 'done' THEN 'done' ELSE NULL END) = 'done'
+  AND COALESCE(ps.category, CASE
+      WHEN p.status IN ('in_progress', 'in_review', 'blocked') THEN 'started'
+      ELSE NULL END) = 'started'
   AND NOT EXISTS (
     SELECT 1 FROM comment h
     WHERE h.issue_id = p.id AND h.deleted_at IS NULL
@@ -311,7 +374,7 @@ func (h *Handler) backfillChildResultHandoffs(ctx context.Context) {
 		}
 		var gate string
 		_ = h.DB.QueryRow(ctx,
-			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]' ORDER BY created_at DESC LIMIT 1`,
+			`SELECT content FROM comment WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'agent' AND content ~ '(^|[\n])✅ 验收门[:：]' ORDER BY created_at DESC LIMIT 1`,
 			child.ID).Scan(&gate)
 		h.postChildResultToParent(ctx, child, gate)
 		posted++

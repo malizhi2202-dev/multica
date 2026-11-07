@@ -9,10 +9,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // Liveness: one invariant, one decision table, one ladder.
@@ -83,16 +85,17 @@ type livenessSnapshot struct {
 	Status        string
 	OpenKids      int
 	UnstartedKids int
+	OrphanKids    int
 	// AgentBody/AgentAt are the issue's last agent-authored comment.
 	AgentBody string
 	AgentAt   time.Time
 	// MarkerAt is the newest liveness marker we wrote (rung/owner-asked).
 	MarkerAt time.Time
-	// MemberAfterAgent is true when a human spoke after that agent comment:
-	// they are the actor now, and their comment wakes the assignee itself.
-	MemberAfterAgent bool
-	Rung             int
-	GateAt           time.Time
+	// MemberAt is the latest human comment after the agent's turn. Its normal
+	// trigger gets one window before liveness repairs a missed dispatch.
+	MemberAt time.Time
+	Rung     int
+	GateAt   time.Time
 }
 
 // livenessAction is what the table decides for one snapshot.
@@ -100,17 +103,20 @@ type livenessAction int
 
 const (
 	actNone livenessAction = iota
-	// actAccept: in_review with a current gate; the acceptance sweep closes it.
+	// actAccept: current gate on a runnable issue; the acceptance sweep closes it.
 	actAccept
 	// actWakeAssignee: the issue stopped with no successor; ask its own agent.
 	actWakeAssignee
 	// actCloseReview: a review cannot close itself; ask the assignee to finish.
 	actCloseReview
-	// actWakeParent: a parent's only open child never started; ask the parent.
+	// actWakeParent: children await start/retry or lack an executable assignee.
 	actWakeParent
 	// actClimb: the previous rung did not act; hand it one rung up.
 	actClimb
 )
+
+// SQL scans absent event times as the Unix epoch, not Go's year-1 zero time.
+func hasLivenessEvent(t time.Time) bool { return t.After(time.Unix(0, 0)) }
 
 // classifyLiveness is the whole decision table. Pure: no I/O, no clock.
 //
@@ -118,8 +124,8 @@ const (
 //
 //  1. A current gate means the work is accepted; closing it is the acceptance
 //     sweep's job, not this one's.
-//  2. A parent whose last open child never started is waiting on something
-//     nobody will start — that parent gets woken.
+//  2. A parent with pending or unassigned children needs a decision about who
+//     starts them, even if other children are still running.
 //  3. A review whose gate is missing or superseded cannot close itself.
 //  4. A sanctioned wait that was addressed to someone is a real wait; once it
 //     goes stale it climbs, because the addressed party did not act.
@@ -127,17 +133,20 @@ const (
 //     dead end.
 //  6. Anything still busy or recent enough is left alone.
 func classifyLiveness(s livenessSnapshot, now time.Time, pol LivenessPolicy) livenessAction {
-	// A human spoke after the agent: they are the actor now, and their comment
-	// wakes the assignee itself. Nothing mechanical to do.
-	if s.MemberAfterAgent {
-		return actNone
+	// Human comments normally dispatch the assignee. If that trigger was lost
+	// and there is still no run after one window, retry through the ladder.
+	if hasLivenessEvent(s.MemberAt) {
+		if now.Sub(s.MemberAt) < pol.AddressedIdle {
+			return actNone
+		}
+		return actWakeAssignee
 	}
 	// A current gate means the work is accepted; closing it is acceptance's job.
-	if s.Status == "in_review" && !s.GateAt.IsZero() && !s.GateAt.Before(s.AgentAt) {
+	if s.Status != "blocked" && hasLivenessEvent(s.GateAt) && !s.GateAt.Before(s.AgentAt) {
 		return actAccept
 	}
 	if s.OpenKids > 0 {
-		if s.OpenKids == 1 && s.UnstartedKids == 1 && now.Sub(s.AgentAt) >= pol.AddressedIdle {
+		if (s.OpenKids == s.UnstartedKids || s.OrphanKids > 0) && now.Sub(s.AgentAt) >= pol.AddressedIdle {
 			return actWakeParent
 		}
 		// Waiting on children that are running is exactly what a parent should
@@ -146,7 +155,7 @@ func classifyLiveness(s livenessSnapshot, now time.Time, pol LivenessPolicy) liv
 	}
 	// We already nudged after this turn: give that nudge its window, then climb.
 	// The marker is the only system comment that means "an actor was asked".
-	if !s.MarkerAt.IsZero() && s.MarkerAt.After(s.AgentAt) {
+	if hasLivenessEvent(s.MarkerAt) && s.MarkerAt.After(s.AgentAt) {
 		if now.Sub(s.MarkerAt) < pol.AddressedIdle {
 			return actNone
 		}
@@ -162,9 +171,13 @@ func classifyLiveness(s livenessSnapshot, now time.Time, pol LivenessPolicy) liv
 	parked := isLegalParkComment(s.AgentBody)
 	if parked {
 		if addressedToMember(s.AgentBody) {
-			// The person who must decide was named in the park itself; the
-			// unanswered-human-request pass makes sure they are told.
-			return actNone
+			// The unanswered-human-request pass tells the person once. An
+			// unanswered child still has to climb: otherwise it holds its
+			// parent's stage barrier open forever.
+			if now.Sub(s.AgentAt) < pol.WaitIdle {
+				return actNone
+			}
+			return actClimb
 		}
 		if !addressedTo(s.AgentBody) {
 			// A park that named nobody: nobody is coming. Climb immediately.
@@ -215,55 +228,96 @@ func rungMarker(rung int, issueID string) string {
 }
 
 // livenessIssuesSQL is the single candidate query: every non-terminal issue with
-// no run in flight and no unfinished children. Classification happens in Go.
+// no run in flight and no active children. Classification happens in Go.
 const livenessIssuesSQL = `
 WITH active AS (
     SELECT DISTINCT issue_id
     FROM agent_task_queue
-    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+    WHERE status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 ), kids AS (
-    SELECT parent_issue_id,
-           COUNT(*) FILTER (WHERE status NOT IN ('done', 'cancelled')) AS open_kids,
-           COUNT(*) FILTER (WHERE status IN ('backlog', 'todo')) AS unstarted_kids
-    FROM issue
-    WHERE parent_issue_id IS NOT NULL
-    GROUP BY parent_issue_id
+    SELECT c.parent_issue_id,
+           COUNT(*) FILTER (WHERE COALESCE(cs.category, CASE
+               WHEN c.status = 'done' THEN 'done'
+               WHEN c.status = 'cancelled' THEN 'closed'
+               ELSE 'started' END) NOT IN ('done', 'closed')) AS open_kids,
+           COUNT(*) FILTER (WHERE COALESCE(cs.category, CASE
+               WHEN c.status IN ('backlog', 'todo') THEN 'unstarted'
+               ELSE 'started' END) = 'unstarted' AND ca.issue_id IS NULL) AS unstarted_kids,
+           COUNT(*) FILTER (WHERE COALESCE(cs.category, CASE
+               WHEN c.status IN ('in_progress', 'in_review', 'blocked') THEN 'started'
+               ELSE NULL END) = 'started'
+               AND (c.assignee_type IS NULL OR c.assignee_id IS NULL OR c.assignee_type = 'member')
+               AND ca.issue_id IS NULL) AS orphan_kids
+    FROM issue c
+    LEFT JOIN issue_status cs ON cs.workspace_id = c.workspace_id AND cs.key = c.status
+    LEFT JOIN active ca ON ca.issue_id = c.id
+    WHERE c.parent_issue_id IS NOT NULL
+    GROUP BY c.parent_issue_id
 ), last_agent AS (
     SELECT DISTINCT ON (issue_id) issue_id, content, created_at
     FROM comment
     WHERE deleted_at IS NULL AND author_type = 'agent'
     ORDER BY issue_id, created_at DESC
-), last_marker AS (
-    SELECT issue_id, MAX(created_at) AS at
-    FROM comment
-    WHERE deleted_at IS NULL
-      AND (content LIKE '%<!-- rung:%' OR content LIKE '%<!-- owner-asked:%')
-    GROUP BY issue_id
 ), member_after AS (
-    SELECT DISTINCT a.issue_id
+    SELECT a.issue_id, MAX(m.created_at) AS at
     FROM last_agent a
     JOIN comment m ON m.issue_id = a.issue_id
     WHERE m.deleted_at IS NULL AND m.author_type = 'member' AND m.created_at > a.created_at
-), rung AS (
-    SELECT issue_id, MAX((regexp_match(content, '<!-- rung:([0-9]+):'))[1]::int) AS n
-    FROM comment
-    WHERE deleted_at IS NULL AND content LIKE '%<!-- rung:%'
-    GROUP BY issue_id
-), gate AS (
+    GROUP BY a.issue_id
+), last_member AS (
     SELECT issue_id, MAX(created_at) AS at
     FROM comment
-    WHERE deleted_at IS NULL AND content ~ '(^|[\n])✅ 验收门[:：]'
+    WHERE deleted_at IS NULL AND author_type = 'member'
     GROUP BY issue_id
+), progress AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND author_type = 'system'
+      AND (type = 'system' OR content LIKE '%<!-- handoff:%')
+    GROUP BY issue_id
+), last_marker AS (
+    SELECT c.issue_id, MAX(c.created_at) AS at
+    FROM comment c
+    LEFT JOIN last_member m ON m.issue_id = c.issue_id
+    LEFT JOIN progress p ON p.issue_id = c.issue_id
+    WHERE c.deleted_at IS NULL
+      AND (c.content LIKE '%<!-- rung:%' OR c.content LIKE '%<!-- owner-asked:%')
+      AND c.created_at > GREATEST(COALESCE(m.at, 'epoch'::timestamptz),
+                                  COALESCE(p.at, 'epoch'::timestamptz))
+    GROUP BY c.issue_id
+), rung AS (
+    SELECT c.issue_id, MAX((regexp_match(c.content, '<!-- rung:([0-9]+):'))[1]::int) AS n
+    FROM comment c
+    LEFT JOIN last_member m ON m.issue_id = c.issue_id
+    LEFT JOIN progress p ON p.issue_id = c.issue_id
+    WHERE c.deleted_at IS NULL AND c.content LIKE '%<!-- rung:%'
+      AND c.created_at > GREATEST(COALESCE(m.at, 'epoch'::timestamptz),
+                                  COALESCE(p.at, 'epoch'::timestamptz))
+    GROUP BY c.issue_id
+), gate_raw AS (
+    SELECT issue_id, MAX(created_at) AS at
+    FROM comment
+    WHERE deleted_at IS NULL AND author_type = 'agent'
+      AND content ~ '(^|[\n])✅ 验收门[:：]'
+    GROUP BY issue_id
+), gate AS (
+    SELECT g.issue_id, g.at
+    FROM gate_raw g
+    WHERE NOT EXISTS (SELECT 1 FROM comment h
+        WHERE h.issue_id = g.issue_id AND h.deleted_at IS NULL
+          AND h.author_type = 'system' AND h.created_at > g.at
+          AND (h.type = 'system' OR h.content LIKE '%<!-- handoff:%'))
 )
 SELECT i.id::text, i.status,
-       COALESCE(k.open_kids, 0), COALESCE(k.unstarted_kids, 0),
-       a.content, a.created_at,
+       COALESCE(k.open_kids, 0), COALESCE(k.unstarted_kids, 0), COALESCE(k.orphan_kids, 0),
+       COALESCE(a.content, ''), COALESCE(a.created_at, i.created_at),
        COALESCE(mk.at, 'epoch'::timestamptz),
-       (ma.issue_id IS NOT NULL),
+       COALESCE(ma.at, 'epoch'::timestamptz),
        COALESCE(r.n, 0),
        COALESCE(g.at, 'epoch'::timestamptz)
 FROM issue i
-JOIN last_agent a ON a.issue_id = i.id
+LEFT JOIN issue_status ist ON ist.workspace_id = i.workspace_id AND ist.key = i.status
+LEFT JOIN last_agent a ON a.issue_id = i.id
 LEFT JOIN active ac ON ac.issue_id = i.id
 LEFT JOIN kids k ON k.parent_issue_id = i.id
 LEFT JOIN last_marker mk ON mk.issue_id = i.id
@@ -271,13 +325,15 @@ LEFT JOIN member_after ma ON ma.issue_id = i.id
 LEFT JOIN rung r ON r.issue_id = i.id
 LEFT JOIN gate g ON g.issue_id = i.id
 WHERE ac.issue_id IS NULL
-  AND i.status IN ('in_progress', 'blocked', 'in_review')
+  AND COALESCE(ist.category, CASE
+      WHEN i.status IN ('in_progress', 'blocked', 'in_review') THEN 'started'
+      ELSE NULL END) = 'started'
   AND i.assignee_type IS NOT NULL AND i.assignee_id IS NOT NULL
-  -- Parents normally wait on children; that is their job. The one exception is a
-  -- parent whose only open child never started: nothing will ever make progress.
+  -- Parents normally wait on children. Pending or unassigned children with no
+  -- active run need a parent decision instead of holding the barrier forever.
   AND (COALESCE(k.open_kids, 0) = 0
-       OR (k.open_kids = 1 AND k.unstarted_kids = 1))
-ORDER BY a.created_at
+       OR (k.open_kids = k.unstarted_kids) OR k.orphan_kids > 0)
+ORDER BY COALESCE(a.created_at, i.created_at)
 LIMIT 200
 `
 
@@ -286,7 +342,7 @@ LIMIT 200
 // issue stalled again, the next move is up a level. For a top-level issue that
 // level is the workspace owner — which is where a human decision belongs.
 func applyLadder(action livenessAction, rung int) livenessAction {
-	if rung >= 1 && (action == actWakeAssignee || action == actCloseReview) {
+	if rung >= 1 && (action == actWakeAssignee || action == actCloseReview || action == actWakeParent) {
 		return actClimb
 	}
 	return action
@@ -314,8 +370,8 @@ func (h *Handler) SweepLiveness(ctx context.Context) int {
 	var snaps []livenessSnapshot
 	for rows.Next() {
 		var s livenessSnapshot
-		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids,
-			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAfterAgent, &s.Rung, &s.GateAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
 			slog.Warn("liveness: scan failed", "error", err)
 			continue
 		}
@@ -440,7 +496,7 @@ func (h *Handler) closeReview(ctx context.Context, s livenessSnapshot) bool {
 	}
 	mention := h.issueAssigneeMention(ctx, issue)
 	reason := "本 issue 处于 `in_review` 但缺少 `✅ 验收门` 记录"
-	if !s.GateAt.IsZero() && s.GateAt.Before(s.AgentAt) {
+	if hasLivenessEvent(s.GateAt) && s.GateAt.Before(s.AgentAt) {
 		reason = "`✅ 验收门` 之后又出现了智能体评论，旧门禁变成历史记录，自动收口不会再依据它"
 	}
 	content := fmt.Sprintf(
@@ -458,21 +514,22 @@ func (h *Handler) closeReview(ctx context.Context, s livenessSnapshot) bool {
 	return true
 }
 
-// wakeParentOnUnstartedChild wakes the parent whose only open child never ran:
+// wakeParentOnUnstartedChild wakes the parent when a child needs assignment,
+// start or retry:
 // only done/cancelled close a stage, so this waits forever otherwise.
 func (h *Handler) wakeParentOnUnstartedChild(ctx context.Context, s livenessSnapshot) bool {
 	issue, _, ok := h.loadForAction(ctx, s)
 	if !ok {
 		return false
 	}
-	childLabel := h.openUnstartedChildLabel(ctx, issue)
+	childLabel := h.openPendingChildLabel(ctx, issue)
 	if childLabel == "" {
 		return false
 	}
 	mention := h.issueAssigneeMention(ctx, issue)
 	content := fmt.Sprintf(
-		"%s子任务未启动：本 issue 只剩 %s 未终结，而它处于 `backlog`/`todo` 且从未运行过，已 %d 分钟没有运行任务（服务端机械巡检）。\n"+
-			"请本轮决定：置 `in_progress` 开工；或置 `cancelled` 并写明原因（可重建）；确实要人等就写 `⏳ 等待确认 <问题>`。\n%s",
+		"%s子任务待处理：%s 待启动、重试或缺少可执行负责人；父级已 %d 分钟没有运行任务（服务端机械巡检）。\n"+
+			"请本轮决定：启动可执行的子任务；或取消不再需要的子任务并写明原因（可重建）；确实要人等就写 `⏳ 等待确认 <问题>`。\n%s",
 		mention, childLabel, int(time.Since(s.AgentAt).Minutes()), rungMarker(1, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
 		return false
@@ -493,9 +550,29 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 	}
 	next, stop := climbTarget(s.Rung, issue.ParentIssueID.Valid)
 	if stop {
-		// At the top rung the only remaining mechanical act is making sure the
-		// owner was actually told. An old rung-3 marker from a previous build (or
-		// a ladder that stopped before notifying) must not end in silence.
+		// The ladder is exhausted. A child may not rest in `in_progress`: it is
+		// the thing holding its parent's barrier open, and waiting for a human
+		// forever is exactly how a delivery stops half-way. Close it with its
+		// gaps recorded so the stage can finish; a top-level issue stays open and
+		// goes to the owner, because that is the user-facing promise.
+		if issue.ParentIssueID.Valid {
+			return h.concludeChild(ctx, issue, s)
+		}
+		// Older sweeps could write rung 3 before the owner notification was
+		// delivered. Repair that one missing handoff, then stop permanently.
+		var ownerAsked bool
+		if err := h.DB.QueryRow(ctx, `SELECT EXISTS (
+SELECT 1 FROM comment WHERE issue_id = $1 AND deleted_at IS NULL
+AND content LIKE '%<!-- owner-asked:%'
+AND created_at > GREATEST(
+    COALESCE((SELECT MAX(created_at) FROM comment
+        WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'member'), 'epoch'::timestamptz),
+    COALESCE((SELECT MAX(created_at) FROM comment
+        WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'system'
+          AND (type = 'system' OR content LIKE '%<!-- handoff:%')), 'epoch'::timestamptz))
+)`, issue.ID).Scan(&ownerAsked); err != nil || ownerAsked {
+			return false
+		}
 		next = 3
 	}
 	mention := h.issueAssigneeMention(ctx, issue)
@@ -505,25 +582,33 @@ func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 		minutes = 1
 	}
 
-	if next == 1 {
+	if next == 2 {
 		parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID)
-		if err != nil {
-			return false
+		if err == nil {
+			leaderID, squadID, ok := h.parentLeader(ctx, parent)
+			if ok {
+				content := fmt.Sprintf(
+					"%s升级到父级：本子任务已停 %d 分钟，最后一条是执行角色的结论，决定权在父级负责人。\n"+
+						"待裁决：%s\n"+
+						"父级负责人请**在本 issue** 给出结论（扩写集 / 调整顺序 / 降级 / 关闭并记录原因），或写明 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。只在父 issue 讨论、不回到本 issue，子任务会一直停在这里。\n%s",
+					mention, minutes, question, rungMarker(2, s.ID))
+				commentID, err := h.postSystemComment(ctx, issue, content)
+				if err != nil {
+					return false
+				}
+				if _, err := h.postSystemComment(ctx, parent, fmt.Sprintf(
+					"子任务升级：[#%d %s](mention://issue/%s) 已停 %d 分钟，待父级裁决：%s\n"+
+						"父负责人已被派往子 issue 处理；本条只同步父级全局视图。\n<!-- child-escalation:%s:rung2 -->",
+					issue.Number, sanitizeChildTitleForSystemComment(issue.Title), s.ID,
+					minutes, question, s.ID)); err != nil {
+					slog.Warn("liveness: parent escalation summary failed", "parent_id", uuidToString(parent.ID), "child_id", s.ID, "error", err)
+				}
+				return h.enqueueLeader(ctx, issue, leaderID, squadID, commentID)
+			}
 		}
-		leaderID, squadID, ok := h.parentLeader(ctx, parent)
-		if !ok {
-			return false
-		}
-		content := fmt.Sprintf(
-			"%s升级到父级：本子任务已停 %d 分钟，最后一条是执行角色的结论，决定权在父级负责人。\n"+
-				"待裁决：%s\n"+
-				"父级负责人请**在本 issue** 给出结论（扩写集 / 调整顺序 / 降级 / 关闭并记录原因），或写明 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。只在父 issue 讨论、不回到本 issue，子任务会一直停在这里。\n%s",
-			mention, minutes, question, rungMarker(2, s.ID))
-		commentID, err := h.postSystemComment(ctx, issue, content)
-		if err != nil {
-			return false
-		}
-		return h.enqueueLeader(ctx, issue, leaderID, squadID, commentID)
+		// The parent has no executable leader (or no longer exists); repeatedly
+		// trying rung 2 would trap the child forever. Ask the owner directly.
+		next = 3
 	}
 
 	ownerID, ownerName, ok := h.workspaceOwner(ctx, issue.WorkspaceID)
@@ -540,6 +625,12 @@ SELECT EXISTS (
     WHERE issue_id = $1 AND deleted_at IS NULL
       AND content LIKE '%<!-- owner-asked:%'
       AND created_at > now() - interval '6 hours'
+      AND created_at > GREATEST(
+          COALESCE((SELECT MAX(created_at) FROM comment
+              WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'member'), 'epoch'::timestamptz),
+          COALESCE((SELECT MAX(created_at) FROM comment
+              WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'system'
+                AND (type = 'system' OR content LIKE '%<!-- handoff:%')), 'epoch'::timestamptz))
 )`, issue.ID).Scan(&toldRecently); err == nil && toldRecently {
 		if _, err := h.postSystemComment(ctx, issue, fmt.Sprintf(
 			"阶梯到顶：本 issue 已把待人工确认的请求送到工作区所有者（6 小时内不重复打扰），机械兜底到此为止。\n%s",
@@ -551,8 +642,13 @@ SELECT EXISTS (
 	escalatedFrom := "本任务的执行角色"
 	if issue.ParentIssueID.Valid {
 		if parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID); err == nil {
-			escalatedFrom = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 的负责人",
-				parent.Number, parent.Title, uuidToString(parent.ID))
+			if _, _, ok := h.parentLeader(ctx, parent); ok {
+				escalatedFrom = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 的负责人",
+					parent.Number, parent.Title, uuidToString(parent.ID))
+			} else {
+				escalatedFrom = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 缺少可执行负责人",
+					parent.Number, parent.Title, uuidToString(parent.ID))
+			}
 		}
 	}
 	content := fmt.Sprintf(
@@ -579,15 +675,14 @@ func (h *Handler) loadForAction(ctx context.Context, s livenessSnapshot) (db.Iss
 	if err != nil {
 		return db.Issue{}, "", false
 	}
-	switch issue.Status {
-	case "in_progress", "blocked", "in_review":
-	default:
+	category, err := issuestatus.CategoryWithError(ctx, h.issueStatusCatalog(), issue.WorkspaceID, issue.Status)
+	if err != nil || category != issuestatus.CategoryStarted {
 		return db.Issue{}, "", false
 	}
 	var running int
 	if err := h.DB.QueryRow(ctx, `
 SELECT COUNT(*) FROM agent_task_queue
-WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')`,
+WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')`,
 		issue.ID).Scan(&running); err != nil || running > 0 {
 		return db.Issue{}, "", false
 	}
@@ -597,7 +692,7 @@ WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_l
 // postSystemComment writes one system comment and returns its id.
 func (h *Handler) postSystemComment(ctx context.Context, issue db.Issue, content string) (pgtype.UUID, error) {
 	id := dbid.NewV7()
-	if _, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+	created, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
 		ID:          id,
 		IssueID:     issue.ID,
 		WorkspaceID: issue.WorkspaceID,
@@ -605,10 +700,19 @@ func (h *Handler) postSystemComment(ctx context.Context, issue db.Issue, content
 		AuthorID:    pgtype.UUID{Bytes: [16]byte{}, Valid: true},
 		Content:     content,
 		Type:        "comment",
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Warn("liveness: comment failed", "issue_id", uuidToString(issue.ID), "error", err)
 		return pgtype.UUID{}, err
 	}
+	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), "system", "", map[string]any{
+		"comment":             commentToResponse(created.Comment(), nil, nil),
+		"issue_title":         issue.Title,
+		"issue_assignee_type": textToPtr(issue.AssigneeType),
+		"issue_assignee_id":   uuidToPtr(issue.AssigneeID),
+		"issue_status":        issue.Status,
+		"issue_revision":      created.IssueRevision,
+	})
 	return id, nil
 }
 
@@ -685,38 +789,43 @@ func (h *Handler) issueAssigneeMention(ctx context.Context, issue db.Issue) stri
 	return ""
 }
 
-// openUnstartedChildLabel renders the single open never-ran child, or "" when the
-// shape changed since the snapshot was taken.
-func (h *Handler) openUnstartedChildLabel(ctx context.Context, parent db.Issue) string {
+// openPendingChildLabel renders open children that need start, retry or an
+// executable assignee, or "" when the snapshot is no longer actionable.
+func (h *Handler) openPendingChildLabel(ctx context.Context, parent db.Issue) string {
 	rows, err := h.DB.Query(ctx,
-		`SELECT id::text, number, title FROM issue
-		 WHERE parent_issue_id = $1 AND status NOT IN ('done', 'cancelled')
+		`SELECT i.id::text, i.number, i.title,
+		        COALESCE(s.category, CASE WHEN i.status IN ('backlog', 'todo') THEN 'unstarted' ELSE 'started' END),
+		        (i.assignee_type IS NULL OR i.assignee_id IS NULL OR i.assignee_type = 'member'),
+		        EXISTS (SELECT 1 FROM agent_task_queue t WHERE t.issue_id = i.id
+		            AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred'))
+		 FROM issue i
+		 LEFT JOIN issue_status s ON s.workspace_id = i.workspace_id AND s.key = i.status
+		 WHERE i.parent_issue_id = $1 AND COALESCE(s.category, CASE
+		     WHEN i.status = 'done' THEN 'done'
+		     WHEN i.status = 'cancelled' THEN 'closed'
+		     ELSE 'started' END) NOT IN ('done', 'closed')
 		 ORDER BY number`, parent.ID)
 	if err != nil {
 		return ""
 	}
 	defer rows.Close()
-	var id, title string
+	var id, title, category string
 	var number int32
-	count := 0
+	var labels []string
+	var orphan, active bool
 	for rows.Next() {
-		if err := rows.Scan(&id, &number, &title); err != nil {
+		if err := rows.Scan(&id, &number, &title, &category, &orphan, &active); err != nil {
 			return ""
 		}
-		count++
+		if active || (category != "unstarted" && !(category == "started" && orphan)) {
+			continue
+		}
+		labels = append(labels, fmt.Sprintf("[#%d %s](mention://issue/%s)", number, title, id))
 	}
-	if err := rows.Err(); err != nil || count != 1 {
+	if err := rows.Err(); err != nil || len(labels) == 0 {
 		return ""
 	}
-	var started bool
-	if err := h.DB.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM agent_task_queue WHERE issue_id = $1)`, id).Scan(&started); err != nil {
-		return ""
-	}
-	if started {
-		return ""
-	}
-	return fmt.Sprintf("[#%d %s](mention://issue/%s)", number, title, id)
+	return strings.Join(labels, "、")
 }
 
 // summariseWait keeps the parked issue's own question, bounded, so the next rung
@@ -870,7 +979,8 @@ WITH agent_comments AS (
 ), env AS (
     SELECT issue_id, COUNT(*) AS env_parks
     FROM agent_comments
-    WHERE content ~* '(环境|数据库|mysql|schema|凭据|凭证|身份|授权|签发|登记|维护方|secret|token|权限|not configured|未经授权|连接)'
+WHERE (ltrim(content) LIKE '⏳ 等待%' OR ltrim(content) LIKE '⛔ 需要人工审批%')
+      AND content ~* '(环境|数据库|mysql|schema|凭据|凭证|身份|授权|签发|登记|维护方|secret|token|权限|not configured|未经授权|连接)'
       AND content !~* '(生产|线上|prod|删除|发布|部署|外发|sudo)'
       AND created_at > now() - interval '24 hours'
     GROUP BY issue_id
@@ -893,11 +1003,14 @@ LEFT JOIN answered a ON a.issue_id = n.issue_id
 LEFT JOIN ruled r ON r.issue_id = n.issue_id
 WHERE a.issue_id IS NULL
   AND i.status IN ('in_progress', 'blocked')
-  AND e.env_parks >= 3
+  AND e.env_parks >= 2
+  AND (ltrim(n.content) LIKE '⏳ 等待%' OR ltrim(n.content) LIKE '⛔ 需要人工审批%')
   AND n.content ~* '(环境|数据库|mysql|schema|凭据|凭证|身份|授权|签发|登记|维护方|secret|token|权限|not configured|未经授权|连接)'
   AND n.content !~* '(生产|线上|prod|删除|发布|部署|外发|sudo)'
   AND n.created_at < now() - make_interval(secs => $1)
-  AND (r.at IS NULL OR r.at < n.created_at)
+  -- A default ruling is a decision, not a prompt for a new ruling on every
+  -- later agent turn. A repeated park now goes through the bounded ladder.
+  AND r.at IS NULL
 ORDER BY n.created_at
 LIMIT $2
 `
@@ -941,8 +1054,8 @@ func (h *Handler) sweepEnvironmentDefaultRuling(ctx context.Context) int {
 		mention := h.issueAssigneeMention(ctx, issue)
 		commentID, postErr := h.postSystemComment(ctx, issue, fmt.Sprintf(
 			"%s默认裁决（环境缺失 ≠ 阻塞）：本 issue 已第 %d 次以「登记环境 / 凭据 / 身份授权」为由停车，机械兜底按协议直接裁决，不再问人。\n"+
-				"裁决：**按本地替代环境继续** —— 先用**本机**（`127.0.0.1` / `localhost`，含本机已开的等价端口，如 3307）的实例建库建角色，不要拿远端 IP 当唯一入口；账号/密钥按代码生成合成身份，外部系统用 mock，走通同一条验收路径。证据逐条标注「本地替代环境」，不得写成登记环境通过。\n"+
-				"本轮要求：按上述方式补齐能补的证据并推进；因本地替代而缺的项，写进交付说明与验收证据，不改 AC 口径也不冒充通过。\n"+
+				"裁决：先核对用户已给的测试环境、端口和项目实际 datasource；能连接就直接在**获授权的测试范围**用目标技术栈做合成数据验证。不可用时自建同类本地替代；MySQL 验收不得拿 SQLite 代替。只写自己创建或获明确授权的数据，外部系统可用 mock，证据标明环境与真实 verify 输出。\n"+
+				"本轮要求：补齐能补的证据并推进；若发起人已明确接受本地测试通过作为验收，就按该口径判断 AC。确实缺的项记入交付说明，不冒充通过；同一环境问题不得再次停车。\n"+
 				"仅当涉及生产 / 线上 / 凭据外发等红线时，才允许改写成 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。\n"+
 				"<!-- default-ruling:env:%s -->",
 			mention, p.count, p.issueID))
@@ -958,4 +1071,54 @@ func (h *Handler) sweepEnvironmentDefaultRuling(ctx context.Context) int {
 		slog.Info("liveness: recorded the default environment ruling", "issue_id", p.issueID, "parks", p.count)
 	}
 	return ruled
+}
+
+// concludeChild gives a stalled CHILD a terminal state, with its gaps recorded.
+//
+// This is the difference between "a task moves" and "a task can finish". Every
+// non-terminal child holds its parent's stage barrier open, so a child that has
+// exhausted the ladder and still cannot proceed must end with its gap written
+// down. A historical acceptance gate cannot turn that gap into a success; the
+// barrier sweeper handles current gates before this path runs.
+func (h *Handler) concludeChild(ctx context.Context, issue db.Issue, s livenessSnapshot) bool {
+	if !issue.ParentIssueID.Valid {
+		return false
+	}
+	var recorded bool
+	if err := h.DB.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM comment WHERE issue_id = $1 AND deleted_at IS NULL
+               AND content LIKE '%<!-- concluded:' || $2 || ' -->%'
+               AND created_at > COALESCE((SELECT MAX(created_at) FROM comment
+                   WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'system'
+                     AND (type = 'system' OR content LIKE '%<!-- handoff:%')), 'epoch'::timestamptz))`,
+		issue.ID, uuidToString(issue.ID)).Scan(&recorded); err != nil {
+		return false
+	}
+	outcome := "cancelled"
+	title := "结案（按缺口取消）"
+	detail := "机械兜底用尽（执行者 → 父级负责人 → 工作区所有者都没有推进），本子任务按缺口取消，记录如下，之后可由父级重建。"
+	gap := summariseWait(s.AgentBody)
+	if gap == "" {
+		gap = "（无）"
+	}
+	if !recorded {
+		if _, err := h.postSystemComment(ctx, issue, fmt.Sprintf(
+			"**%s**：%s\n缺口 / 最后卡点：%s\n处理：子任务置 `%s`，结果回传父级，stage 屏障继续；需要时按同一分支与证据重建。\n<!-- concluded:%s -->",
+			title, detail, gap, outcome, s.ID)); err != nil {
+			return false
+		}
+	}
+	updated, err := h.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+		ID:          issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		Status:      outcome,
+	})
+	if err != nil {
+		slog.Warn("liveness: conclude update failed", "issue_id", s.ID, "error", err)
+		return false
+	}
+	// Closes the parent's stage barrier when this was the last open child.
+	h.notifyParentOfChildDone(ctx, issue, updated)
+	slog.Info("liveness: concluded a stalled child", "issue_id", s.ID, "as", outcome)
+	return true
 }

@@ -1,9 +1,13 @@
 package handler
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/internal/util"
 )
 
 // A parked issue is one that legitimately waits on a human. Everything else that
@@ -83,10 +87,16 @@ func TestClassifyLiveness(t *testing.T) {
 		want livenessAction
 	}{
 		{
-			name: "a human spoke last: they are the actor",
+			name: "recent human comment gets time to trigger assignee",
 			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
-				AgentBody: "T01 仍未通过", MemberAfterAgent: true},
+				AgentBody: "T01 仍未通过", MemberAt: ago(time.Minute)},
 			want: actNone,
+		},
+		{
+			name: "human comment trigger failed and has no active run",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
+				AgentBody: "T01 仍未通过", MemberAt: ago(time.Hour)},
+			want: actWakeAssignee,
 		},
 		{
 			name: "current gate is accepted, not our job",
@@ -95,8 +105,14 @@ func TestClassifyLiveness(t *testing.T) {
 			want: actAccept,
 		},
 		{
+			name: "in progress with current gate waits for barrier sweep",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: gate,
+				AgentBody: "✅ 验收门：AC 3/3", GateAt: gate},
+			want: actAccept,
+		},
+		{
 			name: "review with a superseded gate",
-			snap: livenessSnapshot{Status: "in_review", AgentAt: ago(5 * time.Minute),
+			snap: livenessSnapshot{Status: "in_review", AgentAt: ago(15 * time.Minute),
 				AgentBody: "本轮未能完成", GateAt: gate},
 			want: actCloseReview,
 		},
@@ -109,6 +125,18 @@ func TestClassifyLiveness(t *testing.T) {
 		{
 			name: "parent waiting on a never-started child",
 			snap: livenessSnapshot{Status: "in_progress", OpenKids: 1, UnstartedKids: 1,
+				AgentAt: ago(time.Hour), AgentBody: "等子任务"},
+			want: actWakeParent,
+		},
+		{
+			name: "parent waiting on several never-started children",
+			snap: livenessSnapshot{Status: "in_progress", OpenKids: 3, UnstartedKids: 3,
+				AgentAt: ago(time.Hour), AgentBody: "等子任务"},
+			want: actWakeParent,
+		},
+		{
+			name: "parent has an unassigned child with no run",
+			snap: livenessSnapshot{Status: "in_progress", OpenKids: 2, OrphanKids: 1,
 				AgentAt: ago(time.Hour), AgentBody: "等子任务"},
 			want: actWakeParent,
 		},
@@ -143,10 +171,16 @@ func TestClassifyLiveness(t *testing.T) {
 			want: actNone,
 		},
 		{
-			name: "park addressed to a human is a real wait, however stale",
-			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
+			name: "recent park addressed to a human remains a real wait",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(5 * time.Minute),
 				AgentBody: "⏳ 等待确认：[@owner](mention://member/abc) 请提供审核分支"},
 			want: actNone,
+		},
+		{
+			name: "unanswered human park eventually climbs so a child can close",
+			snap: livenessSnapshot{Status: "in_progress", AgentAt: ago(3 * time.Hour),
+				AgentBody: "⏳ 等待确认：[@owner](mention://member/abc) 请提供审核分支"},
+			want: actClimb,
 		},
 		{
 			name: "stale addressed park climbs",
@@ -213,7 +247,7 @@ func TestGateAutoAdvanceBlocked(t *testing.T) {
 		{"in_progress", "⛔ 本轮未能在当前 checkout 实施 T16", true},
 		{"in_progress", "已完成 T16 实现并补证", false},
 		{"in_review", "✅ 验收门：AC 3/3", false},
-		{"in_review", "⛔ 验收门未过：缺少记录", false},
+		{"in_review", "⛔ 验收门未过：缺少记录", true},
 	}
 	for _, tc := range cases {
 		if got := gateAutoAdvanceBlocked(tc.status, tc.lastComment); got != tc.want {
@@ -222,13 +256,188 @@ func TestGateAutoAdvanceBlocked(t *testing.T) {
 	}
 }
 
-func TestGateSupersededByAgent(t *testing.T) {
+func TestGateSupersededByActor(t *testing.T) {
 	gate := time.Date(2026, 11, 5, 17, 17, 0, 0, time.UTC)
-	if gateSupersededByAgent(gate, gate) {
+	if gateSupersededByActor(gate, gate) {
 		t.Error("gate as the last agent word must not be superseded")
 	}
-	if !gateSupersededByAgent(gate, gate.Add(time.Hour)) {
+	if !gateSupersededByActor(gate, gate.Add(time.Hour)) {
 		t.Error("an agent speaking after the gate supersedes it")
+	}
+}
+
+func TestBarrierDoesNotAcceptGateAfterMemberRequestsRework(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "barrier review agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "review with rework request", map[string]any{"status": "in_review"})
+	dbfx.Comment(t, issueID, "✅ 验收门：AC 1/1", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-30 * time.Minute),
+	})
+	dbfx.Comment(t, issueID, "请先修复 T01，再提交验收", map[string]any{
+		"created_at": time.Now().Add(-20 * time.Minute),
+	})
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("barrier accepted a superseded gate, moved=%d", moved)
+	}
+	id, err := util.ParseUUID(issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := testHandler.Queries.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue.Status != "in_review" {
+		t.Fatalf("issue status = %q after rework request, want in_review", issue.Status)
+	}
+}
+
+func TestBarrierResolvesCustomStartedParentAndDoneChild(t *testing.T) {
+	ctx := context.Background()
+	dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID, "key": "barrier_started", "name": "Barrier Started", "category": "started", "color": "#123456",
+	})
+	dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID, "key": "barrier_done", "name": "Barrier Done", "category": "done", "color": "#123456",
+	})
+	agentID := dbfx.Agent(t, "barrier custom agent", testRuntimeID)
+	parentID := dbfx.Issue(t, "custom barrier parent", map[string]any{"status": "barrier_started"})
+	dbfx.Issue(t, "custom terminal child", map[string]any{"status": "barrier_done", "parent_issue_id": parentID})
+	dbfx.Comment(t, parentID, "✅ 验收门：AC 1/1", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-30 * time.Minute),
+	})
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 1 {
+		t.Fatalf("custom status barrier moved=%d, want 1", moved)
+	}
+	id, err := util.ParseUUID(parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := testHandler.Queries.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent.Status != "done" {
+		t.Fatalf("custom started parent status=%q, want done", parent.Status)
+	}
+}
+
+func TestBarrierRejectsMemberWrittenGate(t *testing.T) {
+	ctx := context.Background()
+	issueID := dbfx.Issue(t, "member quotes acceptance", map[string]any{"status": "in_review"})
+	dbfx.Comment(t, issueID, "✅ 验收门：只是引用旧文本", map[string]any{
+		"created_at": time.Now().Add(-30 * time.Minute),
+	})
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("member comment was accepted as agent gate, moved=%d", moved)
+	}
+}
+
+func TestBarrierDoesNotCloseBlockedIssueFromHistoricalGate(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "blocked gate agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "blocked after prior gate", map[string]any{"status": "blocked"})
+	dbfx.Comment(t, issueID, "✅ 验收门：旧阶段通过", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-30 * time.Minute),
+	})
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("blocked issue auto closed from old gate, moved=%d", moved)
+	}
+}
+
+func TestBarrierDoesNotCloseParentBeforeReviewingBackfilledChildResult(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "parent review agent", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent gate before child result", map[string]any{
+		"status": "in_review", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	childID := dbfx.Issue(t, "child finished after parent gate", map[string]any{
+		"status": "done", "parent_issue_id": parentID,
+	})
+	dbfx.Comment(t, parentID, "✅ 验收门：旧父级结论", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-40 * time.Minute),
+	})
+	dbfx.Comment(t, childID, "✅ 验收门：子级新结果", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-20 * time.Minute),
+	})
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("parent closed before reviewing new child result, moved=%d", moved)
+	}
+	var handoffs int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content LIKE '%<!-- handoff:%'`, parentID).Scan(&handoffs); err != nil {
+		t.Fatal(err)
+	}
+	if handoffs != 1 {
+		t.Fatalf("child result handoffs=%d, want one", handoffs)
+	}
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if s.ID == parentID {
+			found = true
+			if action := classifyLiveness(s, time.Now(), DefaultLivenessPolicy()); action != actCloseReview {
+				rows.Close()
+				t.Fatalf("parent after new child result classified as %v, want review repair", action)
+			}
+		}
+	}
+	rows.Close()
+	if !found {
+		t.Fatal("parent awaiting child result review absent from liveness candidates")
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE comment SET created_at = now() - interval '20 minutes'
+WHERE issue_id = $1 AND content LIKE '%<!-- handoff:%'`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("historical parent gate accepted after child handoff, moved=%d", moved)
+	}
+}
+
+func TestBarrierStageProgressSupersedesParentGate(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "stage progress review agent", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent awaiting stage summary", map[string]any{"status": "in_review"})
+	dbfx.Comment(t, parentID, "✅ 验收门：旧父级结论", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-40 * time.Minute),
+	})
+	dbfx.Comment(t, parentID, "Stage 2 has completed", map[string]any{
+		"author_type": "system", "type": "system", "created_at": time.Now().Add(-20 * time.Minute),
+	})
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("parent closed from gate before stage progress, moved=%d", moved)
+	}
+}
+
+func TestBarrierRechecksCandidateAfterMemberReply(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "barrier race agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "gate before new reply", map[string]any{"status": "in_review"})
+	dbfx.Comment(t, issueID, "✅ 验收门：AC 1/1", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-30 * time.Minute),
+	})
+	var candidate, status, lastComment string
+	var gateAt, actorAt time.Time
+	if err := testPool.QueryRow(ctx, barrierReadyIssuesSQL,
+		int(barrierSweepIdle.Seconds()), issueID).Scan(&candidate, &status, &lastComment, &gateAt, &actorAt); err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Comment(t, issueID, "验收要返工，先不要关闭")
+	id, err := util.ParseUUID(issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, advanced := testHandler.advanceBarrierCandidate(ctx, id); advanced {
+		t.Fatal("barrier advanced a candidate after a new member reply")
 	}
 }
 
@@ -245,7 +454,8 @@ func TestApplyLadder(t *testing.T) {
 		{actWakeAssignee, 1, actClimb},        // already asked: climb
 		{actCloseReview, 2, actClimb},         // already asked twice: still climb
 		{actClimb, 0, actClimb},               // a park that named nobody
-		{actWakeParent, 3, actWakeParent},     // parent actions are not re-asked
+		{actWakeParent, 0, actWakeParent},     // first ask: the parent leader
+		{actWakeParent, 1, actClimb},          // repeated parent wake must escalate
 		{actNone, 3, actNone},
 		{actAccept, 1, actAccept},
 	}
@@ -260,6 +470,459 @@ func TestApplyLadder(t *testing.T) {
 // a turn that left nothing behind is re-armed sooner than one that named someone,
 // and a review still gets its own window. A change here is a deliberate policy
 // change, not an accident.
+func TestConcludeChildDoesNotAcceptHistoricalGate(t *testing.T) {
+	fx := newChildDoneFixture(t, "in_progress")
+	ctx := context.Background()
+	id, err := util.ParseUUID(fx.child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := testHandler.Queries.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testHandler.postSystemComment(ctx, child, "✅ 验收门：历史记录，后来发现缺口"); err != nil {
+		t.Fatal(err)
+	}
+	if !testHandler.concludeChild(ctx, child, livenessSnapshot{ID: fx.child.ID, AgentBody: "⏳ 等待确认：验收证据不足"}) {
+		t.Fatal("exhausted child was not concluded")
+	}
+	updated, err := testHandler.Queries.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "cancelled" {
+		t.Fatalf("historical gate closed stalled child as %s, want cancelled", updated.Status)
+	}
+}
+
+func TestConcludeChildRetriesAfterCommentSucceededButStatusFailed(t *testing.T) {
+	fx := newChildDoneFixture(t, "in_progress")
+	ctx := context.Background()
+	id, err := util.ParseUUID(fx.child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := testHandler.Queries.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testHandler.postSystemComment(ctx, child, "previous interrupted attempt <!-- concluded:"+fx.child.ID+" -->"); err != nil {
+		t.Fatal(err)
+	}
+	if !testHandler.concludeChild(ctx, child, livenessSnapshot{ID: fx.child.ID, AgentBody: "⏳ 等待确认：仍未交付"}) {
+		t.Fatal("comment from a failed prior attempt prevented status retry")
+	}
+	updated, err := testHandler.Queries.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "cancelled" {
+		t.Fatalf("retried child status = %s, want cancelled", updated.Status)
+	}
+	var markers int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content LIKE '%<!-- concluded:%'`, id).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if markers != 1 {
+		t.Fatalf("retry wrote %d conclusion comments, want one", markers)
+	}
+}
+
+func TestClimbTopRungRepairsMissingOwnerNotificationOnce(t *testing.T) {
+	ctx := context.Background()
+	id := dbfx.Issue(t, "legacy top rung", map[string]any{"status": "in_progress"})
+	s := livenessSnapshot{ID: id, Rung: 3, AgentAt: time.Now().Add(-time.Hour), AgentBody: "⏳ 等待确认：需裁决"}
+	if !testHandler.climb(ctx, s) {
+		t.Fatal("legacy top rung did not notify the owner")
+	}
+	var notifications int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content LIKE '%<!-- owner-asked:ladder:%'`, id).Scan(&notifications); err != nil {
+		t.Fatal(err)
+	}
+	if notifications != 1 {
+		t.Fatalf("owner notifications = %d, want 1", notifications)
+	}
+	if testHandler.climb(ctx, s) {
+		t.Fatal("top rung notified owner twice")
+	}
+}
+
+func TestClimbChildMakesEscalationVisibleOnParent(t *testing.T) {
+	ctx := context.Background()
+	leaderID := dbfx.Agent(t, "parent escalation leader", testRuntimeID)
+	workerID := dbfx.Agent(t, "child escalation worker", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent needs global view", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": leaderID,
+	})
+	childID := dbfx.Issue(t, "child needs decision", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": workerID, "parent_issue_id": parentID,
+	})
+	s := livenessSnapshot{ID: childID, Status: "in_progress", Rung: 1,
+		AgentAt: time.Now().Add(-time.Hour), AgentBody: "⏳ 等待确认：测试环境如何处理"}
+	if !testHandler.climb(ctx, s) {
+		t.Fatal("child escalation did not enqueue parent leader")
+	}
+	var parentNotes int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content LIKE '%<!-- child-escalation:%'`, parentID).Scan(&parentNotes); err != nil {
+		t.Fatal(err)
+	}
+	if parentNotes != 1 {
+		t.Fatalf("parent escalation notes=%d, want one", parentNotes)
+	}
+}
+
+func TestClimbChildWithoutExecutableParentLeaderEscalatesToOwner(t *testing.T) {
+	ctx := context.Background()
+	workerID := dbfx.Agent(t, "child without parent leader worker", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent without executable leader", map[string]any{"status": "in_progress"})
+	childID := dbfx.Issue(t, "child awaiting parent decision", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": workerID, "parent_issue_id": parentID,
+	})
+	s := livenessSnapshot{ID: childID, Status: "in_progress", Rung: 1,
+		AgentAt: time.Now().Add(-time.Hour), AgentBody: "⏳ 等待确认：缺父级负责人"}
+	if !testHandler.climb(ctx, s) {
+		t.Fatal("missing parent leader left child at the same rung")
+	}
+	var ownerNotes int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content LIKE '%<!-- owner-asked:ladder:%'`, childID).Scan(&ownerNotes); err != nil {
+		t.Fatal(err)
+	}
+	if ownerNotes != 1 {
+		t.Fatalf("owner escalation notes=%d, want one", ownerNotes)
+	}
+}
+
+func TestLivenessCandidateIncludesParentWithUnstartedChildren(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "liveness parent leader", testRuntimeID)
+	parentID := dbfx.Issue(t, "liveness parent", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	dbfx.Issue(t, "unstarted child one", map[string]any{"status": "todo", "parent_issue_id": parentID})
+	dbfx.Issue(t, "unstarted child two", map[string]any{"status": "backlog", "parent_issue_id": parentID})
+	dbfx.Comment(t, parentID, "waiting on children", map[string]any{
+		"author_type": "agent", "author_id": agentID,
+	})
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			t.Fatal(err)
+		}
+		if s.ID == parentID {
+			if s.OpenKids != 2 || s.UnstartedKids != 2 {
+				t.Fatalf("parent children = %d open, %d unstarted; want 2/2", s.OpenKids, s.UnstartedKids)
+			}
+			if action := classifyLiveness(s, time.Now().Add(time.Hour), DefaultLivenessPolicy()); action != actWakeParent {
+				t.Fatalf("parent with no human reply classified as %v, want parent wake", action)
+			}
+			return
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("parent with two unstarted children was absent from liveness candidates")
+}
+
+func TestLivenessCandidateIncludesParentWithUnassignedChild(t *testing.T) {
+	ctx := context.Background()
+	leaderID := dbfx.Agent(t, "orphan child parent leader", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent with orphan child", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": leaderID,
+	})
+	dbfx.Issue(t, "unassigned started child", map[string]any{
+		"status": "in_progress", "parent_issue_id": parentID,
+	})
+	dbfx.Comment(t, parentID, "等子任务", map[string]any{"author_type": "agent", "author_id": leaderID})
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			t.Fatal(err)
+		}
+		if s.ID == parentID {
+			if s.OrphanKids != 1 || s.OpenKids != 1 {
+				t.Fatalf("parent children = %d open, %d orphan; want 1/1", s.OpenKids, s.OrphanKids)
+			}
+			parentUUID, err := util.ParseUUID(parentID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent, err := testHandler.Queries.GetIssue(ctx, parentUUID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if label := testHandler.openPendingChildLabel(ctx, parent); !strings.Contains(label, "unassigned started child") {
+				t.Fatalf("orphan child absent from parent action summary: %q", label)
+			}
+			return
+		}
+	}
+	t.Fatal("parent with unassigned child was absent from liveness candidates")
+}
+
+func TestParentWakeIncludesChildWaitingForRetry(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "child retry agent", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent waiting for retry", map[string]any{"status": "in_progress"})
+	childID := dbfx.Issue(t, "retryable child", map[string]any{"status": "todo", "parent_issue_id": parentID})
+	dbfx.Task(t, agentID, testutil.Cols{"issue_id": childID, "status": "completed", "runtime_id": testRuntimeID})
+	parentUUID, err := util.ParseUUID(parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := testHandler.Queries.GetIssue(ctx, parentUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if label := testHandler.openPendingChildLabel(ctx, parent); !strings.Contains(label, "retryable child") {
+		t.Fatalf("parent wake omitted child awaiting retry: %q", label)
+	}
+}
+
+func TestHumanReplyResetsExhaustedLivenessLadder(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "ladder reset agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "owner replied after escalation", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	dbfx.Comment(t, issueID, "⏳ 等待确认：需要裁决", map[string]any{"author_type": "agent", "author_id": agentID})
+	dbfx.Comment(t, issueID, "<!-- rung:3:"+issueID+" --><!-- owner-asked:ladder:"+issueID+" -->", map[string]any{"author_type": "system"})
+	dbfx.Comment(t, issueID, "按现有测试环境继续")
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			t.Fatal(err)
+		}
+		if s.ID == issueID {
+			if s.Rung != 0 || s.MemberAt.IsZero() {
+				t.Fatalf("reply should reset ladder, got rung=%d member=%v", s.Rung, s.MemberAt)
+			}
+			return
+		}
+	}
+	t.Fatal("issue with owner reply absent from liveness candidates")
+}
+
+func TestChildProgressResetsExhaustedParentLivenessLadder(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "parent after child progress agent", testRuntimeID)
+	parentID := dbfx.Issue(t, "parent receives new child result", map[string]any{
+		"status": "in_review", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	dbfx.Comment(t, parentID, "✅ 验收门：旧父级结论", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-time.Hour),
+	})
+	dbfx.Comment(t, parentID, "已通知所有者 <!-- rung:3:"+parentID+" --><!-- owner-asked:ladder:"+parentID+" -->", map[string]any{
+		"author_type": "system", "created_at": time.Now().Add(-30 * time.Minute),
+	})
+	dbfx.Comment(t, parentID, "子任务结果回传 <!-- handoff:child-result -->", map[string]any{
+		"author_type": "system", "created_at": time.Now().Add(-20 * time.Minute),
+	})
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			t.Fatal(err)
+		}
+		if s.ID == parentID {
+			if s.Rung != 0 || hasLivenessEvent(s.MarkerAt) {
+				t.Fatalf("new child result did not reset parent ladder: rung=%d marker=%v", s.Rung, s.MarkerAt)
+			}
+			if action := classifyLiveness(s, time.Now(), DefaultLivenessPolicy()); action != actCloseReview {
+				t.Fatalf("parent after child result classified as %v, want review repair", action)
+			}
+			return
+		}
+	}
+	t.Fatal("parent with new child result absent from liveness candidates")
+}
+
+func TestDeferredReconnectTaskKeepsIssueOutOfLivenessAndBarrierSweeps(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "long offline continuation agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "waiting for runtime reconnect", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	dbfx.Comment(t, issueID, "✅ 验收门：旧结论", map[string]any{
+		"author_type": "agent", "author_id": agentID, "created_at": time.Now().Add(-time.Hour),
+	})
+	dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": issueID, "status": "deferred", "runtime_id": testRuntimeID,
+		"fire_at": time.Now().Add(-time.Hour),
+	})
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if s.ID == issueID {
+			rows.Close()
+			t.Fatal("waiting retry was treated as an idle issue")
+		}
+	}
+	rows.Close()
+	if moved := testHandler.SweepBarrierLiveness(ctx); moved != 0 {
+		t.Fatalf("waiting retry's old gate was accepted, moved=%d", moved)
+	}
+}
+
+func TestLivenessCandidateIncludesAssignedIssueWithoutAgentComment(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "unstarted assignee", testRuntimeID)
+	issueID := dbfx.Issue(t, "assigned but never dispatched", map[string]any{
+		"status": "in_progress", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			t.Fatal(err)
+		}
+		if s.ID == issueID {
+			if s.AgentBody != "" || s.AgentAt.IsZero() {
+				t.Fatalf("unexpected starting snapshot: %+v", s)
+			}
+			return
+		}
+	}
+	t.Fatal("assigned issue without agent comment was invisible to liveness")
+}
+
+func TestLivenessCandidateResolvesCustomStatusCategories(t *testing.T) {
+	ctx := context.Background()
+	dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID, "key": "liveness_started", "name": "Liveness Started", "category": "started", "color": "#123456",
+	})
+	dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID, "key": "liveness_done", "name": "Liveness Done", "category": "done", "color": "#123456",
+	})
+	agentID := dbfx.Agent(t, "custom status agent", testRuntimeID)
+	parentID := dbfx.Issue(t, "custom status parent", map[string]any{
+		"status": "liveness_started", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	dbfx.Issue(t, "custom done child", map[string]any{"status": "liveness_done", "parent_issue_id": parentID})
+	rows, err := testPool.Query(ctx, livenessIssuesSQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s livenessSnapshot
+		if err := rows.Scan(&s.ID, &s.Status, &s.OpenKids, &s.UnstartedKids, &s.OrphanKids,
+			&s.AgentBody, &s.AgentAt, &s.MarkerAt, &s.MemberAt, &s.Rung, &s.GateAt); err != nil {
+			t.Fatal(err)
+		}
+		if s.ID == parentID {
+			if s.OpenKids != 0 {
+				t.Fatalf("custom done child counted as open: %d", s.OpenKids)
+			}
+			return
+		}
+	}
+	t.Fatal("custom started parent was absent from liveness candidates")
+}
+
+func TestLivenessActionAcceptsCustomStartedStatus(t *testing.T) {
+	ctx := context.Background()
+	dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID, "key": "custom_live_action", "name": "Custom Live Action", "category": "started", "color": "#123456",
+	})
+	agentID := dbfx.Agent(t, "custom action agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "custom active issue", map[string]any{
+		"status": "custom_live_action", "assignee_type": "agent", "assignee_id": agentID,
+	})
+	if _, _, ok := testHandler.loadForAction(ctx, livenessSnapshot{ID: issueID}); !ok {
+		t.Fatal("custom started issue was selected but rejected before repair")
+	}
+}
+
+func TestEnvironmentRulingIsIssuedOnceForActualParks(t *testing.T) {
+	ctx := context.Background()
+	agentID := dbfx.Agent(t, "environment ruling agent", testRuntimeID)
+	issueID := dbfx.Issue(t, "environment ruling issue", map[string]any{"status": "in_progress"})
+	park := func() {
+		dbfx.Comment(t, issueID, "⏳ 等待确认：MySQL 测试环境在哪里？", map[string]any{
+			"author_type": "agent", "author_id": agentID,
+		})
+	}
+	candidate := func() bool {
+		rows, err := testPool.Query(ctx, environmentParksSQL, 0, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, body string
+			var at time.Time
+			var count int
+			if err := rows.Scan(&id, &body, &at, &count); err != nil {
+				t.Fatal(err)
+			}
+			if id == issueID {
+				return true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return false
+	}
+	// Mere discussion of the environment must not consume the park budget.
+	dbfx.Comment(t, issueID, "MySQL 环境已发现，继续执行", map[string]any{
+		"author_type": "agent", "author_id": agentID,
+	})
+	if candidate() {
+		t.Fatal("ordinary environment discussion triggered default ruling")
+	}
+	park()
+	park()
+	if !candidate() {
+		t.Fatal("second actual environment park did not trigger one ruling")
+	}
+	dbfx.Comment(t, issueID, "裁决 <!-- default-ruling:env:"+issueID+" -->", map[string]any{
+		"author_type": "system", "author_id": testUserID,
+	})
+	park()
+	if candidate() {
+		t.Fatal("a later park triggered a duplicate default ruling")
+	}
+}
+
 func TestLivenessPolicyOrdering(t *testing.T) {
 	pol := DefaultLivenessPolicy()
 	if pol.DeadEndIdle >= pol.AddressedIdle {
