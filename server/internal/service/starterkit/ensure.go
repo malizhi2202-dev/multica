@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -224,6 +226,11 @@ func ensureAgents(ctx context.Context, q Querier, workspaceID, owner pgtype.UUID
 	b *Bundle, skillIDs map[string]pgtype.UUID, res *Result) (map[string]pgtype.UUID, error) {
 
 	ids := make(map[string]pgtype.UUID, len(b.Agents))
+	byName := make(map[string]string, len(b.Agents))
+	var created []AgentDef
+	for _, def := range b.Agents {
+		byName[def.Name] = def.Key
+	}
 	for _, def := range b.Agents {
 		existing, err := q.GetAgentIDByWorkspaceAndName(ctx, db.GetAgentIDByWorkspaceAndNameParams{
 			WorkspaceID: workspaceID,
@@ -260,6 +267,7 @@ func ensureAgents(ctx context.Context, q Querier, workspaceID, owner pgtype.UUID
 			return nil, fmt.Errorf("starterkit: create agent %q: %w", def.Name, err)
 		}
 		ids[def.Key] = agent.ID
+		created = append(created, def)
 		res.Agents++
 
 		for _, name := range def.Skills {
@@ -276,7 +284,47 @@ func ensureAgents(ctx context.Context, q Querier, workspaceID, owner pgtype.UUID
 			res.Bindings++
 		}
 	}
+	// Fixture links contain IDs from the workspace where the bundle was
+	// authored. Resolve them only after every target has its workspace-local ID.
+	// Existing agents are intentionally left untouched.
+	for _, def := range created {
+		instructions, err := resolveAgentMentions(def.Instructions, byName, ids)
+		if err != nil {
+			return nil, fmt.Errorf("starterkit: agent %q mentions: %w", def.Name, err)
+		}
+		if instructions == def.Instructions {
+			continue
+		}
+		if _, err := q.UpdateAgent(ctx, db.UpdateAgentParams{
+			ID:           ids[def.Key],
+			Instructions: pgtype.Text{String: instructions, Valid: true},
+		}); err != nil {
+			return nil, fmt.Errorf("starterkit: resolve agent %q mentions: %w", def.Name, err)
+		}
+	}
 	return ids, nil
+}
+
+var bundledAgentMention = regexp.MustCompile(`\[@([^]]+)\]\(mention://agent/[0-9a-fA-F-]{36}\)`)
+
+func resolveAgentMentions(content string, byName map[string]string, ids map[string]pgtype.UUID) (string, error) {
+	var out strings.Builder
+	last := 0
+	for _, match := range bundledAgentMention.FindAllStringSubmatchIndex(content, -1) {
+		name := content[match[2]:match[3]]
+		key, ok := byName[name]
+		if !ok || !ids[key].Valid {
+			return "", fmt.Errorf("target %q is not in the imported workspace", name)
+		}
+		out.WriteString(content[last:match[0]])
+		fmt.Fprintf(&out, "[@%s](mention://agent/%s)", name, uuidText(ids[key]))
+		last = match[1]
+	}
+	if last == 0 {
+		return content, nil
+	}
+	out.WriteString(content[last:])
+	return out.String(), nil
 }
 
 // ensureSquads imports each squad with its leader and roster. An unresolvable

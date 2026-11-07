@@ -66,6 +66,7 @@ type Querier interface {
 	CreateSkill(ctx context.Context, arg db.CreateSkillParams) (db.Skill, error)
 	UpsertSkillFile(ctx context.Context, arg db.UpsertSkillFileParams) (db.SkillFile, error)
 	CreateAgent(ctx context.Context, arg db.CreateAgentParams) (db.Agent, error)
+	UpdateAgent(ctx context.Context, arg db.UpdateAgentParams) (db.Agent, error)
 	AddAgentSkill(ctx context.Context, arg db.AddAgentSkillParams) error
 	CreateSquad(ctx context.Context, arg db.CreateSquadParams) (db.Squad, error)
 	AddSquadMember(ctx context.Context, arg db.AddSquadMemberParams) (db.SquadMember, error)

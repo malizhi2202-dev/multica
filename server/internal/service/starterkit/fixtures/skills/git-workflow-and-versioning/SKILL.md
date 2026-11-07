@@ -12,6 +12,18 @@ Git is your safety net. Treat commits as save points, branches as sandboxes, and
 
 Always. Every code change flows through git.
 
+## Find Work Across Local Git History
+
+When a branch, commit, merge, or file seems missing, inspect the local repository before concluding it is gone. A remote without the object, or an unavailable network, does not prove local work was lost. Search read-only, in this order:
+
+1. Record `git status --short --branch`, `git worktree list`, and `git remote -v`. Check the working tree and index, including untracked files.
+2. List every local and remote-tracking ref with `git branch -a -vv` and `git show-ref --heads --tags`; inspect tags and candidate refs with `git log --all --oneline --decorate --graph` and `git log --all --merges --oneline`.
+3. Search content and changes across all reachable commits with `git log --all -- <path>`, `git log --all -S'<text>' -- <path>`, `git log --all -G'<pattern>' -- <path>`, and `git show <sha>`. Include merge parents when the result depends on a merge.
+4. Inspect local recovery records with `git reflog --all --date=iso`, `git stash list`, and the refs of other worktrees. If these do not locate the object, use `git fsck --full --no-reflogs --unreachable` to find local dangling commits and trees.
+5. Record the exact SHA, source ref, relationship to the current branch, and a safe recovery command. Verify the candidate diff before cherry-pick or merge. Keep the result as a checkpoint when the remote is offline; reconcile with the remote after connectivity returns.
+
+These commands search local objects without rewriting history. Never run `git gc`, prune, hard reset, merge, rebase, or push as part of discovery. Do not limit a recovery search to `HEAD` or the default branch.
+
 ## Core Principles
 
 ### Trunk-Based Development (Recommended)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -202,6 +203,41 @@ func TestEnsureImportsTheBundleOnce(t *testing.T) {
 		t.Errorf("%d of %d imported skills are credited to the workspace owner", n, res.Skills)
 	}
 
+	t.Run("agent mentions resolve inside the new workspace", func(t *testing.T) {
+		rows, err := pool.Query(ctx, `SELECT name, id::text, instructions FROM agent WHERE workspace_id = $1`, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		type installedAgent struct{ id, instructions string }
+		agents := make(map[string]installedAgent)
+		for rows.Next() {
+			var name string
+			var agent installedAgent
+			if err := rows.Scan(&name, &agent.id, &agent.instructions); err != nil {
+				t.Fatal(err)
+			}
+			agents[name] = agent
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		link := regexp.MustCompile(`\[@([^]]+)\]\(mention://agent/([0-9a-f-]{36})\)`)
+		checked := 0
+		for name, agent := range agents {
+			for _, match := range link.FindAllStringSubmatch(agent.instructions, -1) {
+				target, ok := agents[match[1]]
+				if !ok || target.id != match[2] {
+					t.Errorf("%s mentions %s at %s; target in this workspace is %s", name, match[1], match[2], target.id)
+				}
+				checked++
+			}
+		}
+		if checked == 0 {
+			t.Fatal("bundle had no agent mentions to verify")
+		}
+	})
+
 	t.Run("content survives the round trip", func(t *testing.T) {
 		// Pick the richest skill and a multi-file skill: the byte comparison is
 		// what proves frontmatter stripping and embedding lost nothing.
@@ -244,8 +280,13 @@ func TestEnsureImportsTheBundleOnce(t *testing.T) {
 		f.QueryRow(t, `SELECT instructions, coalesce(avatar_url, '') FROM agent
 			WHERE workspace_id = $1 AND name = $2`, ws, richest.Name).
 			Scan(&instructions, &avatar)
-		if instructions != richest.Instructions {
-			t.Errorf("agent %q: instructions lost or altered in import", richest.Key)
+		// Workspace IDs are expected to change; the surrounding instructions
+		// must survive byte-for-byte when link targets are normalized.
+		normalizeLinks := func(s string) string {
+			return regexp.MustCompile(`mention://agent/[0-9a-f-]{36}`).ReplaceAllString(s, "mention://agent/<workspace-id>")
+		}
+		if normalizeLinks(instructions) != normalizeLinks(richest.Instructions) {
+			t.Errorf("agent %q: non-link instructions lost or altered in import", richest.Key)
 		}
 		if avatar != richest.AvatarURL {
 			t.Errorf("agent %q: avatar = %q, want %q", richest.Key, avatar, richest.AvatarURL)
