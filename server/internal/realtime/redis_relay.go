@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -132,13 +133,14 @@ func deliverEnvelope(hub *Hub, daemonRuntime DaemonRuntimeDeliverer, wecomOutbou
 // per-scope Redis Stream and consumes streams for which there are local
 // subscribers. Local fanout is delegated to the wrapped *Hub.
 type RedisRelay struct {
-	hub       *Hub
-	writeRDB  redis.UniversalClient
-	readRDB   redis.UniversalClient
-	nodeID    string
-	retention StreamRetentionConfig
-	ttl       *streamTTLRefresher
-	now       func() time.Time
+	hub              *Hub
+	writeRDB         redis.UniversalClient
+	readRDB          redis.UniversalClient
+	nodeID           string
+	retention        StreamRetentionConfig
+	ttl              *streamTTLRefresher
+	now              func() time.Time
+	minIDUnsupported atomic.Bool
 
 	mu        sync.Mutex
 	consumers map[scopeKey]*scopeConsumer
@@ -555,8 +557,8 @@ func (r *RedisRelay) sweepLegacyStreams(ctx context.Context) {
 }
 
 func (r *RedisRelay) maintainLegacyStream(ctx context.Context, stream, minID string) {
-	if trimmed, err := r.writeRDB.XTrimMinID(ctx, stream, minID).Result(); err != nil && !errors.Is(err, redis.Nil) {
-		r.recordRetentionError("XTRIM MINID failed", err, "stream", stream, "min_id", minID)
+	if trimmed, err := trimStreamBefore(ctx, r.writeRDB, &r.minIDUnsupported, stream, minID); err != nil && !errors.Is(err, redis.Nil) {
+		r.recordRetentionError("stream age trim failed", err, "stream", stream, "min_id", minID)
 	} else if trimmed > 0 {
 		M.RedisRelayStreamTrimmedTotal.Add(trimmed)
 	}

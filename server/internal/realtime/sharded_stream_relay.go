@@ -154,13 +154,14 @@ func (c ShardedStreamRelayConfig) Validate() error {
 // filters events by hub subscriptions. This keeps blocked Redis connections
 // bounded by pod_count * shard_count instead of active_scope_count.
 type ShardedStreamRelay struct {
-	hub      *Hub
-	writeRDB redis.UniversalClient
-	readRDB  redis.UniversalClient
-	nodeID   string
-	config   ShardedStreamRelayConfig
-	now      func() time.Time
-	ttl      *streamTTLRefresher
+	hub              *Hub
+	writeRDB         redis.UniversalClient
+	readRDB          redis.UniversalClient
+	nodeID           string
+	config           ShardedStreamRelayConfig
+	now              func() time.Time
+	ttl              *streamTTLRefresher
+	minIDUnsupported atomic.Bool
 
 	mu       sync.Mutex
 	stopping bool
@@ -373,9 +374,9 @@ func (r *ShardedStreamRelay) maintainStreams(ctx context.Context) {
 		}
 		r.updateStreamPresence(shard, true)
 
-		trimmed, err := r.writeRDB.XTrimMinID(maintCtx, stream, minID).Result()
+		trimmed, err := trimStreamBefore(maintCtx, r.writeRDB, &r.minIDUnsupported, stream, minID)
 		if err != nil && !errors.Is(err, redis.Nil) {
-			r.recordRetentionError("XTRIM MINID failed", err, "stream", stream, "min_id", minID)
+			r.recordRetentionError("stream age trim failed", err, "stream", stream, "min_id", minID)
 		} else if trimmed > 0 {
 			M.RedisRelayStreamTrimmedTotal.Add(trimmed)
 		}
