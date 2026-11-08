@@ -542,39 +542,44 @@ func (h *Handler) wakeParentOnUnstartedChild(ctx context.Context, s livenessSnap
 	return true
 }
 
-// climb moves the issue one rung: parent leader, then the workspace owner.
+// climb moves the issue one rung, skipping a rung it cannot use.
+//
+//	rung 1 → the parent's leader, unless that is the same agent that owns this
+//	         issue (a child and its parent often share one agent, and waking it
+//	         "as the parent" is the same actor being asked twice)
+//	rung 2 → the workspace owner
+//	rung 3 → terminal: a child is concluded, a top-level issue gets one summary
 func (h *Handler) climb(ctx context.Context, s livenessSnapshot) bool {
 	issue, _, ok := h.loadForAction(ctx, s)
 	if !ok {
 		return false
 	}
-	next, stop := climbTarget(s.Rung, issue.ParentIssueID.Valid)
-	if stop {
-		// The ladder is exhausted. A child may not rest in `in_progress`: it is
-		// the thing holding its parent's barrier open, and waiting for a human
-		// forever is exactly how a delivery stops half-way. Close it with its
-		// gaps recorded so the stage can finish; a top-level issue stays open and
-		// goes to the owner, because that is the user-facing promise.
-		if issue.ParentIssueID.Valid {
-			return h.concludeChild(ctx, issue, s)
+	if s.Rung >= 3 {
+		if issue.ParentIssueID.Valid && h.concludeChild(ctx, issue, s) {
+			return true
 		}
-		// Older sweeps could write rung 3 before the owner notification was
-		// delivered. Repair that one missing handoff, then stop permanently.
-		var ownerAsked bool
-		if err := h.DB.QueryRow(ctx, `SELECT EXISTS (
-SELECT 1 FROM comment WHERE issue_id = $1 AND deleted_at IS NULL
-AND content LIKE '%<!-- owner-asked:%'
-AND created_at > GREATEST(
-    COALESCE((SELECT MAX(created_at) FROM comment
-        WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'member'), 'epoch'::timestamptz),
-    COALESCE((SELECT MAX(created_at) FROM comment
-        WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'system'
-          AND (type = 'system' OR content LIKE '%<!-- handoff:%')), 'epoch'::timestamptz))
-)`, issue.ID).Scan(&ownerAsked); err != nil || ownerAsked {
+		return h.finalSummary(ctx, issue, s)
+	}
+
+	next := s.Rung + 1
+	var leaderID, squadID pgtype.UUID
+	if next == 2 && issue.ParentIssueID.Valid {
+		parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID)
+		if err != nil {
 			return false
 		}
-		next = 3
+		id, sq, ok := h.parentLeader(ctx, parent)
+		if !ok {
+			next = 3
+		} else if id == issue.AssigneeID {
+			// The parent is the same actor: asking it again is the loop this
+			// ladder exists to break, so go straight to the owner.
+			next = 3
+		} else {
+			leaderID, squadID = id, sq
+		}
 	}
+
 	mention := h.issueAssigneeMention(ctx, issue)
 	question := summariseWait(s.AgentBody)
 	minutes := int(time.Since(s.AgentAt).Minutes())
@@ -583,41 +588,23 @@ AND created_at > GREATEST(
 	}
 
 	if next == 2 {
-		parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID)
-		if err == nil {
-			leaderID, squadID, ok := h.parentLeader(ctx, parent)
-			if ok {
-				content := fmt.Sprintf(
-					"%s升级到父级：本子任务已停 %d 分钟，最后一条是执行角色的结论，决定权在父级负责人。\n"+
-						"待裁决：%s\n"+
-						"父级负责人请**在本 issue** 给出结论（扩写集 / 调整顺序 / 降级 / 关闭并记录原因），或写明 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。只在父 issue 讨论、不回到本 issue，子任务会一直停在这里。\n%s",
-					mention, minutes, question, rungMarker(2, s.ID))
-				commentID, err := h.postSystemComment(ctx, issue, content)
-				if err != nil {
-					return false
-				}
-				if _, err := h.postSystemComment(ctx, parent, fmt.Sprintf(
-					"子任务升级：[#%d %s](mention://issue/%s) 已停 %d 分钟，待父级裁决：%s\n"+
-						"父负责人已被派往子 issue 处理；本条只同步父级全局视图。\n<!-- child-escalation:%s:rung2 -->",
-					issue.Number, sanitizeChildTitleForSystemComment(issue.Title), s.ID,
-					minutes, question, s.ID)); err != nil {
-					slog.Warn("liveness: parent escalation summary failed", "parent_id", uuidToString(parent.ID), "child_id", s.ID, "error", err)
-				}
-				return h.enqueueLeader(ctx, issue, leaderID, squadID, commentID)
-			}
+		content := fmt.Sprintf(
+			"%s升级到父级：本子任务已停 %d 分钟，最后一条是执行角色的结论，决定权在父级负责人。\n"+
+				"待裁决：%s\n"+
+				"父级负责人请**在本 issue** 给出结论（扩写集 / 调整顺序 / 降级 / 关闭并记录原因），或写明 `⛔ 需要人工审批 <红线 + 影响 + 默认建议>`。只在父 issue 讨论、不回到本 issue，子任务会一直停在这里。\n%s",
+			mention, minutes, question, rungMarker(2, s.ID))
+		commentID, err := h.postSystemComment(ctx, issue, content)
+		if err != nil {
+			return false
 		}
-		// The parent has no executable leader (or no longer exists); repeatedly
-		// trying rung 2 would trap the child forever. Ask the owner directly.
-		next = 3
+		return h.enqueueLeader(ctx, issue, leaderID, squadID, commentID)
 	}
 
 	ownerID, ownerName, ok := h.workspaceOwner(ctx, issue.WorkspaceID)
 	if !ok {
 		return false
 	}
-	// One owner notification per issue per stretch: the unanswered-human-request
-	// pass already tells the owner about a pending decision, and two messages for
-	// the same thing is exactly the noise this consolidation removed.
+	// One owner notification per issue per stretch.
 	var toldRecently bool
 	if err := h.DB.QueryRow(ctx, `
 SELECT EXISTS (
@@ -625,30 +612,14 @@ SELECT EXISTS (
     WHERE issue_id = $1 AND deleted_at IS NULL
       AND content LIKE '%<!-- owner-asked:%'
       AND created_at > now() - interval '6 hours'
-      AND created_at > GREATEST(
-          COALESCE((SELECT MAX(created_at) FROM comment
-              WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'member'), 'epoch'::timestamptz),
-          COALESCE((SELECT MAX(created_at) FROM comment
-              WHERE issue_id = $1 AND deleted_at IS NULL AND author_type = 'system'
-                AND (type = 'system' OR content LIKE '%<!-- handoff:%')), 'epoch'::timestamptz))
 )`, issue.ID).Scan(&toldRecently); err == nil && toldRecently {
-		if _, err := h.postSystemComment(ctx, issue, fmt.Sprintf(
-			"阶梯到顶：本 issue 已把待人工确认的请求送到工作区所有者（6 小时内不重复打扰），机械兜底到此为止。\n%s",
-			rungMarker(3, s.ID))); err == nil {
-			slog.Info("liveness: owner already told; ladder closed", "issue_id", s.ID)
-		}
-		return false
+		return h.finalSummary(ctx, issue, s)
 	}
 	escalatedFrom := "本任务的执行角色"
 	if issue.ParentIssueID.Valid {
 		if parent, err := h.Queries.GetIssue(ctx, issue.ParentIssueID); err == nil {
-			if _, _, ok := h.parentLeader(ctx, parent); ok {
-				escalatedFrom = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 的负责人",
-					parent.Number, parent.Title, uuidToString(parent.ID))
-			} else {
-				escalatedFrom = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 缺少可执行负责人",
-					parent.Number, parent.Title, uuidToString(parent.ID))
-			}
+			escalatedFrom = fmt.Sprintf("父 issue [#%d %s](mention://issue/%s) 的负责人",
+				parent.Number, parent.Title, uuidToString(parent.ID))
 		}
 	}
 	content := fmt.Sprintf(
@@ -659,6 +630,33 @@ SELECT EXISTS (
 		ownerName, uuidToString(ownerID), issue.Number, issue.Title, uuidToString(issue.ID),
 		escalatedFrom, minutes, issue.Status, question, s.ID, rungMarker(3, s.ID))
 	if _, err := h.postSystemComment(ctx, issue, content); err != nil {
+		return false
+	}
+	return true
+}
+
+// finalSummary closes the mechanical loop without touching status: a child is
+// concluded (terminal); a top-level deliverable gets one summary for its owner
+// and is then left alone. Neither keeps re-waking an agent.
+func (h *Handler) finalSummary(ctx context.Context, issue db.Issue, s livenessSnapshot) bool {
+	if issue.ParentIssueID.Valid && h.concludeChild(ctx, issue, s) {
+		return true
+	}
+	var already bool
+	if err := h.DB.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM comment WHERE issue_id = $1 AND deleted_at IS NULL
+               AND content LIKE '%<!-- final-summary:%')`, issue.ID).Scan(&already); err != nil || already {
+		return false
+	}
+	gap := summariseWait(s.AgentBody)
+	if gap == "" {
+		gap = "（无）"
+	}
+	if _, err := h.postSystemComment(ctx, issue, fmt.Sprintf(
+		"**终局摘要**：机械兜底（执行者 → 父级负责人 → 工作区所有者）已用尽，本 issue 不再自动推进，等你确认。\n"+
+			"当前状态：`%s`；最后卡点：%s\n"+
+			"你只需要回一句：① 继续（我会重跑执行者）② 关闭（置 `cancelled` + 原因）③ 改口径。\n"+
+			"<!-- final-summary:%s -->", issue.Status, gap, s.ID)); err != nil {
 		return false
 	}
 	return true
